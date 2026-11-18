@@ -1,3 +1,6 @@
 /target
 /result
-/.direnv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+devenv.lock
