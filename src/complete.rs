@@ -108,7 +108,7 @@ fn note_candidates(cx: &Ctx, embed: bool, current: &str, line: u32, at: u32) -> 
         if !is_note && !embed {
             continue;
         }
-        let link = vault.link_text(rel);
+        let link = vault.link_text(rel, current);
         let folder = rel.rfind('/').map(|i| rel[..i].to_string());
         out.push(Candidate {
             label: link.clone(),
@@ -168,13 +168,7 @@ fn sub_candidates(cx: &Ctx, rel: &str, path: &str, sub: &str) -> Option<Vec<Cand
         .rsplit_once('#')
         .map(|(p, _)| p.split('#').map(|t| Segment { text: t.into(), span: Span::default(), block: false }).collect())
         .unwrap_or_default();
-    let under = match parents.is_empty() {
-        true => 0..note.headings.len(),
-        false => {
-            let p = vault::find_heading_path(note, &parents)?;
-            p + 1..vault::section(note, p).end
-        }
-    };
+    let under = vault::under_path(note, &parents);
     let out = if blocks {
         note.blocks
             .iter()
@@ -188,8 +182,9 @@ fn sub_candidates(cx: &Ctx, rel: &str, path: &str, sub: &str) -> Option<Vec<Cand
             })
             .collect()
     } else {
-        note.headings[under]
-            .iter()
+        under
+            .into_iter()
+            .map(|i| &note.headings[i])
             .filter(|h| !h.text.is_empty())
             .map(|h| Candidate {
                 label: h.text.clone(),

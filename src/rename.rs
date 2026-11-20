@@ -117,23 +117,20 @@ pub fn rename(cx: &Ctx, rel: &str, pos: Position, new: &str) -> Result<(Workspac
         Target::Note(dest @ Dest::Unwritten(key)) => {
             check_name(new)?;
             // `[[projects/Someday]]` renamed to `Later` stays in `projects`.
-            let new = match key.rsplit_once('/') {
-                Some(_) if new.contains('/') => new.to_string(),
-                Some(_) => {
-                    let written = links_named(vault, dest).next().map(|(_, l)| l.path.clone()).unwrap_or_default();
-                    match written.rsplit_once('/') {
-                        Some((dir, _)) => format!("{dir}/{new}"),
-                        None => new.to_string(),
-                    }
-                }
-                None => new.to_string(),
+            // Links are written from the root, so `./` links from different
+            // folders keep naming one note.
+            let renamed = |from: &str, path: &str| match vault::absolute(from, path).rsplit_once('/') {
+                Some((dir, _)) if key.contains('/') && !new.contains('/') => format!("{dir}/{new}"),
+                _ => new.to_string(),
             };
-            // Naming a note that exists would quietly repoint every link.
-            if let Dest::File(f) = vault.resolve(rel, &new) {
-                return Err(format!("“{}” already exists", vault::link_name(&f)));
-            }
-            for (from, link) in links_named(vault, dest) {
-                edits.entry(from.clone()).or_default().push((link.path_span, new.clone()));
+            let links: Vec<_> = links_named(vault, dest).collect();
+            for (from, link) in &links {
+                let text = renamed(from, &link.path);
+                // Naming a note that exists would quietly repoint the links.
+                if let Dest::File(f) = vault.resolve("", &text) {
+                    return Err(format!("“{}” already exists", vault::link_name(&f)));
+                }
+                edits.entry((*from).clone()).or_default().push((link.path_span, text));
             }
         }
         Target::Heading { file, index } => {
@@ -156,11 +153,10 @@ pub fn rename(cx: &Ctx, rel: &str, pos: Position, new: &str) -> Result<(Workspac
                     if vault.resolve(from, &link.path) != Dest::File(file.clone()) {
                         continue;
                     }
-                    // Each segment names the heading its prefix of the path
-                    // resolves to: `A` in `[[Note#A#B]]` is the `A` above `B`.
+                    // `A` in `[[Note#A#B]]` is the `A` above the `B` it reaches.
                     let segs = link.headings();
-                    for k in 0..segs.len() {
-                        if vault::find_heading_path(note, &segs[..=k]) == Some(*index) {
+                    for (k, h) in vault::heading_chain(note, segs).into_iter().enumerate() {
+                        if h == Some(*index) {
                             edits.entry(from.clone()).or_default().push((segs[k].span, in_link.clone()));
                         }
                     }
@@ -268,9 +264,8 @@ fn same_file(a: &Path, b: &Path) -> bool {
 fn parent_exists(vault: &Vault, to: &str) -> bool {
     match to.rsplit_once('/') {
         None => true,
-        Some((dir, _)) => {
-            vault.path(dir).is_dir() || vault.files.keys().any(|k| k.starts_with(&format!("{dir}/")))
-        }
+        Some((dir, _)) if vault.root.is_dir() => vault.path(dir).is_dir(),
+        Some((dir, _)) => vault.files.keys().any(|k| k.starts_with(&format!("{dir}/"))),
     }
 }
 
@@ -287,7 +282,7 @@ pub fn move_edits(vault: &Vault, moves: &[(String, String)]) -> BTreeMap<String,
             if after.resolve(from_after, &link.path) == Dest::File(want.clone()) {
                 continue;
             }
-            edits.entry(from.clone()).or_default().push((link.path_span, after.link_text(&want)));
+            edits.entry(from.clone()).or_default().push((link.path_span, after.link_text(&want, from_after)));
         }
     }
     edits
@@ -426,6 +421,25 @@ mod tests {
         // `:` is fine in a heading; links leave it out, as Obsidian does.
         let got = run(&v, "N.md", 3, 2, "Why: because").unwrap();
         assert_eq!(got, [("L.md".into(), "Why because".into()), ("N.md".into(), "Why: because".into())]);
+    }
+
+    #[test]
+    fn nested_heading_branches() {
+        let v = Vault::from_files(&[
+            ("N.md", "# Other\n## B\n# A\n## X\n# A\n## B\n"),
+            ("L.md", "[[N#A#B]]"),
+        ]);
+        // The second `A` is the one above the `B` the link reaches.
+        let got = run(&v, "N.md", 4, 2, "C").unwrap();
+        assert_eq!(got, [("L.md".into(), "C".into()), ("N.md".into(), "C".into())]);
+        assert!(run(&v, "N.md", 2, 2, "D").unwrap().iter().all(|(f, _)| f == "N.md"));
+    }
+
+    #[test]
+    fn relative_unwritten_links() {
+        let v = Vault::from_files(&[("a/One.md", "[[./Later]]"), ("b/Two.md", "[[a/Later]]"), ("b/Soon.md", "")]);
+        let got = run(&v, "a/One.md", 0, 4, "Soon").unwrap();
+        assert_eq!(got, [("One.md".into(), "a/Soon".into()), ("Two.md".into(), "a/Soon".into())]);
     }
 
     #[test]

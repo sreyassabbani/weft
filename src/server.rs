@@ -377,7 +377,9 @@ impl Server {
                 }
                 let Some((old, _)) = files.first() else { return null };
                 let Some(i) = self.vault_of(old) else { return null };
-                self.vaults[i].rescan();
+                if self.vaults[i].rescan() {
+                    self.publish_all(i);
+                }
                 let cx = Ctx { vault: &self.vaults[i], enc: self.enc };
                 json(serde_json::to_value(rename::will_rename(&cx, &files)))
             }

@@ -247,8 +247,8 @@ impl Vault {
         self.index.resolve(from, link)
     }
 
-    pub fn link_text(&self, rel: &str) -> String {
-        self.index.link_text(rel)
+    pub fn link_text(&self, rel: &str, from: &str) -> String {
+        self.index.link_text(rel, from)
     }
 
     pub fn open(&mut self, rel: &str, text: String, version: i32) {
@@ -420,22 +420,28 @@ impl Index {
         }
     }
 
-    /// The text a new link to `rel` uses: the name alone when no other file
-    /// shares it, else the full path from the root (Obsidian's default).
-    pub fn link_text(&self, rel: &str) -> String {
+    /// The text a new link in `from` to `rel` uses: the name alone when no
+    /// other file shares it, else the full path from the root (Obsidian's
+    /// default). Each is checked against resolution: `Spec.md` would name
+    /// `Spec.md` before `Docs/Spec.md.md`.
+    pub fn link_text(&self, rel: &str, from: &str) -> String {
         let name = link_name(rel);
-        // Unique, and not shadowed by a path from the root (`Spec.md` names
-        // `Spec.md` before `Docs/Spec.md.md`).
         let unique = self.names.get(&name.to_lowercase()).is_some_and(|v| v.len() == 1);
-        if unique && self.resolve("", name) == Dest::File(rel.to_string()) {
-            name.to_string()
-        } else if is_note(rel) {
-            rel[..rel.len() - 3].to_string()
-        } else {
-            rel.to_string()
+        let short = is_note(rel).then(|| &rel[..rel.len() - 3]);
+        let candidates = unique.then_some(name).into_iter().chain(short).chain([rel]);
+        for text in candidates {
+            if self.resolve(from, text) == Dest::File(rel.to_string()) {
+                return text.to_string();
+            }
         }
+        rel.to_string()
     }
 
+}
+
+/// A link's path from the root, as written (case kept).
+pub fn absolute(from: &str, link: &str) -> String {
+    normalize(dir(from), link)
 }
 
 /// Orders candidates for a name: same folder, shallowest, alphabetical.
@@ -500,6 +506,49 @@ pub fn find_heading_path(note: &Note, segs: &[Segment]) -> Option<usize> {
     fallback
 }
 
+/// The headings above heading `i`, nearest last.
+pub fn ancestors(note: &Note, i: usize) -> Vec<usize> {
+    let mut stack: Vec<usize> = Vec::new();
+    for (j, h) in note.headings[..i].iter().enumerate() {
+        while stack.last().is_some_and(|&k| note.headings[k].level >= h.level) {
+            stack.pop();
+        }
+        stack.push(j);
+    }
+    stack.retain(|&k| note.headings[k].level < note.headings[i].level);
+    stack
+}
+
+/// The heading each segment of `A#B#C` names: `C` as the link resolves,
+/// and `A` and `B` among its ancestors.
+pub fn heading_chain(note: &Note, segs: &[Segment]) -> Vec<Option<usize>> {
+    let mut chain = vec![None; segs.len()];
+    let Some(last) = find_heading_path(note, segs) else { return chain };
+    chain[segs.len() - 1] = Some(last);
+    let mut above = ancestors(note, last);
+    for k in (0..segs.len() - 1).rev() {
+        let key = heading_key(&segs[k].text);
+        while let Some(a) = above.pop() {
+            if heading_key(&note.headings[a].text) == key {
+                chain[k] = Some(a);
+                break;
+            }
+        }
+    }
+    chain
+}
+
+/// Headings under the path `parents`, in any section it names.
+pub fn under_path(note: &Note, parents: &[Segment]) -> Vec<usize> {
+    let keys: Vec<String> = parents.iter().map(|s| heading_key(&s.text)).collect();
+    (0..note.headings.len())
+        .filter(|&i| {
+            let mut above = ancestors(note, i).into_iter().map(|a| heading_key(&note.headings[a].text));
+            keys.iter().all(|k| above.any(|a| &a == k))
+        })
+        .collect()
+}
+
 pub fn find_block(note: &Note, id: &str) -> Option<usize> {
     note.blocks.iter().position(|b| b.id.eq_ignore_ascii_case(id))
 }
@@ -561,15 +610,20 @@ mod tests {
     #[test]
     fn generated_link_text() {
         let v = vault();
-        assert_eq!(v.link_text("2026/11/14.md"), "2026/11/14");
-        assert_eq!(v.link_text("2.71.md"), "2.71");
-        assert_eq!(v.link_text("Array.md"), "Array");
-        assert_eq!(v.link_text("School/Index.md"), "Index");
-        assert_eq!(v.link_text("16.md"), "16");
-        assert_eq!(v.link_text("attachments/Screenshot 1.png"), "Screenshot 1.png");
+        assert_eq!(v.link_text("2026/11/14.md", ""), "2026/11/14");
+        assert_eq!(v.link_text("2.71.md", ""), "2.71");
+        assert_eq!(v.link_text("Array.md", ""), "Array");
+        assert_eq!(v.link_text("School/Index.md", ""), "Index");
+        assert_eq!(v.link_text("16.md", ""), "16");
+        assert_eq!(v.link_text("attachments/Screenshot 1.png", ""), "Screenshot 1.png");
         let v = Vault::from_files(&[("Spec.md", ""), ("Docs/Spec.md.md", "")]);
-        assert_eq!(v.link_text("Docs/Spec.md.md"), "Docs/Spec.md");
+        assert_eq!(v.link_text("Docs/Spec.md.md", ""), "Docs/Spec.md");
         assert_eq!(v.resolve("x.md", "Docs/Spec.md"), file("Docs/Spec.md.md"));
+        // Shadowed from the linking note's folder, then by the full path.
+        let v = Vault::from_files(&[("Docs/Spec.md", ""), ("Notes/Spec.md.md", ""), ("Docs/Index.md", "")]);
+        assert_eq!(v.link_text("Notes/Spec.md.md", "Docs/Index.md"), "Notes/Spec.md");
+        let v = Vault::from_files(&[("Docs/Spec.md", ""), ("Docs/Spec.md.md", "")]);
+        assert_eq!(v.link_text("Docs/Spec.md.md", "x.md"), "Docs/Spec.md.md");
     }
 
     #[test]
