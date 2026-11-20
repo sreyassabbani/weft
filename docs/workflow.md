@@ -2,11 +2,12 @@
 
 Status: draft, open for discussion. Nothing here is built yet.
 
-weft today is a language server. To retire Obsidian, three more things have to
-exist somewhere: the git sync that obsidian-git does, the per-day change list
-that obsidian-list-modified writes, and the daily-note command. This plan asks
-where each belongs, so the result is a few pieces with clear jobs and not a
-pile of scripts.
+The goal is to delete Obsidian entirely. weft today is a language server. To
+get there, a few more things have to exist somewhere: the git sync that
+obsidian-git does, the per-day change list that obsidian-list-modified
+writes, the daily-note command, and a way for weft to recognize the vault
+once `.obsidian/` is gone. This plan decides where each belongs, so the
+result is a few pieces with clear jobs and not a pile of scripts.
 
 ## What Obsidian does now
 
@@ -14,10 +15,11 @@ pile of scripts.
 |---|---|
 | obsidian-git | Every 30 min: commit all changes as `vault backup: <date>`, with the changed files in the body. Pull (merge) before push, then push. Pull when Obsidian starts. Commits are signed. Runs only while Obsidian is open. |
 | obsidian-list-modified | Keeps three blocks in the daily note, `LIST CREATED`, `LIST MODIFIED`, `LIST DELETED`, each a list of `[[links]]` to notes touched that day. Attachments and `.obsidian/` are excluded. |
-| daily notes | `⌘D` opens `YYYY/MM/DD.md` at the vault root, creating it empty. Now `space D` in Helix, from `.helix/config.toml` in the vault. |
+| daily notes | `⌘D` opens `YYYY/MM/DD.md` at the vault root, creating it empty. Done: `space D` in Helix, from `.helix/config.toml` in the vault. |
 
-Not covered by this plan, and still a reason to open Obsidian: images, the
-graph, Bases, Shiki-rendered code.
+Given up with Obsidian, on purpose: the graph, Bases (`Evergreen.base` stays
+as a file but nothing reads it), rendered images (open them with Quick Look),
+tab groups.
 
 ## Principle: each piece lives where its reason to change lives
 
@@ -25,15 +27,15 @@ graph, Bases, Shiki-rendered code.
    the notes, `.helix/config.toml` (vault-only keys), `.gitignore`.
 2. **weft** holds anything that needs to understand a vault: how links
    resolve, how a link to a note should be written, what counts as a note.
-   It is tested, versioned, and public, so it holds no personal paths or
+   It is tested, versioned and public, so it holds no personal paths or
    policy.
 3. **`~/config`** holds machine policy: which binary is installed, how Helix
    is wired, when sync runs, where the vault is. One module, so that turning
    the notes setup on, off, or onto a new machine is one place.
 
-The rule that falls out: if a piece needs to know Obsidian's link rules, it
-goes in weft. If it is a schedule, a path, or a preference, it goes in
-`~/config`. If it is about these particular notes, it goes in the vault.
+If a piece needs to know Obsidian's link rules, it goes in weft. If it is a
+schedule, a path or a preference, it goes in `~/config`. If it is about these
+particular notes, it goes in the vault.
 
 ## Proposed shape
 
@@ -54,78 +56,108 @@ Helix config does not change. Two subcommands are added, both read-only:
 weft still never writes to the vault. Anything that writes is a caller's
 decision.
 
-### `~/config`: one `home/notes.nix` module
+### weft: recognizing the vault without `.obsidian/`
+
+weft finds a vault by the nearest `.obsidian/`. Without one it treats the
+folder as a plain repository, where only Markdown files count. That breaks
+this vault: the 25 `![[...png]]` embeds live in `attachments/` and would all
+show as missing, and attachment completion would stop.
+
+Proposal: an empty `.weft` file at the vault root marks it, and means the same
+as `.obsidian/` does today (every non-hidden file is part of the vault,
+attachments resolve by name anywhere). `.obsidian/` keeps working for other
+people's vaults. The Helix `roots` entry becomes `[".weft", ".obsidian",
+".git"]`. This is the only thing weft would ever ask to have in a vault, and
+it is empty.
+
+### `~/config`: one `home/weft.nix` module
 
 Moves the existing pieces together and adds sync:
 
-- the `weft` package and its Helix language entry (now in `home/helix.nix`)
+- **`weft` on `PATH`.** It isn't now: Helix runs it by its Nix store path,
+  so `weft` in a terminal or a `%sh{}` finds nothing. The module adds it to
+  `home.packages`, which `weft today`, `weft changes` and the sync job need.
+- the Helix language entry for Markdown (now in `home/helix.nix`)
 - the vault path, set once
-- **`launchd.agents.notes-sync`**: a small `writeShellApplication` run every
-  30 min and at login. It does what obsidian-git did: if the tree is dirty,
-  commit `vault backup: <date>` with the changed files in the body; pull
-  with merge; push. It stops without retrying on a merge conflict and leaves
-  it for you. `home/anki-blue.nix` and `home/hammerspoon.nix` already use
-  `launchd.agents`, so this follows an existing pattern.
+- **`launchd.agents.weft-sync`**, described next. `home/anki-blue.nix` and
+  `home/hammerspoon.nix` already use `launchd.agents`, so this follows an
+  existing pattern.
 
-Sync is a script, not a weft subcommand: it is git policy (intervals,
-signing, merge strategy), needs no vault model, and would make a public tool
-carry one person's backup habits.
+### Sync, as one launchd job
 
-### The vault: unchanged, apart from what it already has
+A small `writeShellApplication` with two triggers:
 
-`.helix/config.toml` keeps `space D`. If `weft today` lands, the key switches
-to it.
+- **At login:** pull. This is when remote changes are most likely to be
+  waiting, and no note is open yet.
+- **Every 30 min:** if the tree is dirty, commit `vault backup: <date>` with
+  the changed files in the body. Then push. Pull only if the push is
+  rejected, meaning GitHub has a commit this Mac doesn't. Then merge and
+  push again.
 
-## The decision that shapes the rest: change lists written or derived
+The vault is edited almost only on this Mac (an occasional fix through the
+GitHub app), so a mid-session pull should almost never happen. That avoids
+the main risk without any detection of open editors: Helix does not reload
+files changed on disk, so a pull under an open note leaves a stale buffer,
+and writing it can overwrite the pulled version. On a merge conflict the job
+stops and leaves it for you.
 
-list-modified's real job is tying ideas to time. There are two ways to keep
-that.
+Sync stays a script in `~/config` and not a weft subcommand: it is git
+policy (intervals, signing, merge strategy), needs no vault model, and would
+make a public tool carry one person's backup habits.
 
-**A. Keep writing them into daily notes.** The sync script, at the first run
-of each day, writes yesterday's lists into yesterday's note, using
-`weft changes`. Writing only finished days avoids clobbering a note you have
-open. Old and new daily notes look the same, and `gr` on any note shows the
-days it was touched, because those days link to it.
+### The vault
 
-**B. Stop writing them and derive from git.** Commits already record which
-notes changed. weft shows it on demand, for example a hover line "edited
-Nov 19, Nov 14, Oct 2". No generated text lands in your notes, and nothing
-can conflict. But `gr` no longer lists the days, and the record lives in git
-rather than in the notes.
+`.helix/config.toml` keeps `space D`; it switches to `weft today` once that
+exists. `.weft` is added; `.obsidian/` is deleted.
 
-A is closer to what you have. B is cleaner but changes how you would see
-your history. The existing lists stay either way.
+## The decision that shapes the rest: daily change lists
+
+Today each daily note ends with lists of the notes you created and modified
+that day, as `[[links]]`. Those links have a side effect: they make the daily
+note link to every note you touched.
+
+In Helix, `gr` lists references to what is under the cursor. In code that is
+a variable. With weft, in a note it is the note itself (or the heading or
+link under the cursor), so `gr` lists every note that links to this one. A
+daily note whose list includes `[[Carding everything]]` therefore shows up in
+`gr` from `Carding everything.md`, and the days you worked on a note appear
+among its references.
+
+**A. Keep writing the lists.** The sync job, on its first run each day, writes
+yesterday's lists into yesterday's note using `weft changes`. Only finished
+days are written, so a note you have open is never touched. Daily notes look
+the way they do now, and the days keep showing in `gr`.
+
+**B. Stop writing them.** git already records which notes changed when. weft
+shows it on demand instead, for example a hover line "edited Nov 19, Nov 14,
+Oct 2". Nothing is generated into your notes. The days no longer show in
+`gr`.
+
+The lists already written stay either way.
 
 ## Risks to check before building
 
 - **Signing from launchd.** Commits are signed with GPG. obsidian-git signs
-  fine because it runs inside a GUI app. A launchd job needs gpg-agent to
-  have the key unlocked, or the commit fails. Test before relying on it.
-- **Helix does not reload files changed on disk.** A pull while a note is
-  open leaves a stale buffer, and writing it can overwrite the pulled
-  version.
-  Options: pull only at login and before push, never mid-session (smallest);
-  or have the sync script skip the pull when Helix has the vault open.
-  `:reload-all` is the manual fix.
-- **Sync with Obsidian still installed.** Run either obsidian-git or the
-  launchd job, never both. The switch is: turn off obsidian-git's auto
-  commit, push and pull, then load the agent.
-- **Phone.** If the vault is edited on a phone through Obsidian mobile, git
-  sync there is its own problem and is out of scope.
+  fine because it runs inside a GUI app with gpg-agent's pinentry available.
+  A launchd job may not get a passphrase prompt and would fail to commit.
+  Test before relying on it.
+- **The switch-over.** obsidian-git and the job must never both run. Order:
+  stop using Obsidian, load the job, confirm one commit and push, then
+  delete Obsidian and `.obsidian/`.
 
 ## Order of work
 
-1. `home/notes.nix`: move the weft and Helix pieces in, with no change in
-   behavior.
-2. The sync agent, tested with signing, alongside obsidian-git with its
-   automatic actions turned off.
-3. `weft changes` and `weft today`, then the change-list decision (A or B).
-4. Live without Obsidian for a week; uninstall when nothing pulls you back.
+1. weft: the `.weft` marker. Small, and needed before `.obsidian/` can go.
+2. `~/config`: `home/weft.nix`, moving the package and Helix pieces in and
+   putting `weft` on `PATH`. No change in behavior.
+3. `~/config`: the sync job, tested with signing.
+4. Switch over: add `.weft`, quit Obsidian, run on the job for a few days,
+   then delete Obsidian and `.obsidian/`.
+5. weft: `weft today` and `weft changes`, then build A or B.
 
 ## Open questions
 
-1. Change lists: A (written into daily notes) or B (derived from git)?
-2. Do you edit the vault on your phone?
-3. Should sync pull mid-session, or only at login and right before pushing?
-4. Is the plan document's home right? It sits in weft's public repo because
+1. Change lists: A (keep writing them) or B (derive from git)?
+2. `.weft` as the vault marker: fine, or a different name?
+3. Is the plan document's home right? It sits in weft's public repo because
    most of what it proposes is weft's.
