@@ -375,6 +375,24 @@ impl Vault {
         Some(if is_note(&path) { path } else { format!("{path}.md") })
     }
 
+    /// Seconds since the epoch the file last changed on disk; 0 if unknown.
+    pub fn modified(&self, rel: &str) -> u64 {
+        self.files
+            .get(rel)
+            .and_then(|f| f.stamp)
+            .and_then(|(t, _)| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs())
+    }
+
+    /// Outside an Obsidian vault only notes are listed; an embedded file is
+    /// looked for on disk, from the root and from the note's folder.
+    pub fn on_disk(&self, from: &str, link: &str) -> bool {
+        self.kind != Root::Obsidian
+            && [normalize("", link), normalize(dir(from), &format!("./{link}"))]
+                .iter()
+                .any(|p| !p.is_empty() && self.path(p).is_file())
+    }
+
     /// Whether `name` is taken by a file other than `except`.
     pub fn name_taken(&self, rel: &str, except: &str) -> bool {
         self.lower.get(&rel.to_lowercase()).is_some_and(|r| r != except)
