@@ -122,10 +122,9 @@ turned into spaces and runs of space collapsed; `C` and `C++` stay distinct.
 A heading is only reported missing when nothing matches. A link to a heading
 counts as a reference to its note, as in Obsidian's backlinks.
 
-Frontmatter `aliases:` name the same note. `[[Neighbour Graphs]]` resolves to
-`Directional Edges.md` when that note lists the alias, and completion offers
-the alias, inserting `[[Directional Edges|Neighbour Graphs]]` as Obsidian
-does.
+Frontmatter `aliases:` are offered by completion, which inserts
+`[[Directional Edges|Neighbour Graphs]]`, and shown on hover. As in Obsidian,
+a bare `[[Neighbour Graphs]]` does not resolve to the note.
 
 Markdown links `[text](path)` are not note links: in practice they are web
 links. They only answer go-to-definition, when `path` (relative to the note,
