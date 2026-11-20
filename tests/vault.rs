@@ -9,11 +9,13 @@ use std::time::Instant;
 use weft::ctx::Ctx;
 use weft::parse::Kind;
 use weft::text::{self, Encoding};
-use weft::vault::{self, Dest, Root, Vault};
+use weft::vault::{self, Dest, Vault};
 
 fn load() -> Option<Vault> {
     let root = PathBuf::from(std::env::var_os("WEFT_TEST_VAULT")?);
-    let kind = if root.join(".obsidian").is_dir() { Root::Obsidian } else { Root::Repo };
+    // Found the way the server finds it, from a note at the root.
+    let (found, kind) = vault::discover(&root.join("note.md"));
+    assert_eq!(found, root, "WEFT_TEST_VAULT is not the root of a vault");
     Some(Vault::load(root, kind, None))
 }
 

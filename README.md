@@ -26,17 +26,19 @@ It watches the vault itself and keeps nothing in it.
 
 ## Vaults
 
-The vault is the nearest folder containing `.obsidian`, else the nearest
-containing `.git`, `.jj` or `.hg`. In an Obsidian vault every file that is
-not hidden is part of it; in a repository, Markdown files not ignored by
-`.gitignore`. A file outside both is handled on its own.
+The vault is the nearest folder marked as one, else the nearest containing
+`.git`, `.jj` or `.hg`. A folder is marked by an empty `.weft` file, or by
+the `.obsidian` folder Obsidian keeps. In a marked vault every file that is
+not hidden is part of it, so attachments resolve by name anywhere; in a
+repository, Markdown files not ignored by `.gitignore`. A file outside both
+is handled on its own.
 
 ## Helix
 
 ```toml
 [[language]]
 name = "markdown"
-roots = [".obsidian", ".git"]
+roots = [".weft", ".obsidian", ".git"]
 language-servers = ["weft"]
 
 [language-server.weft]

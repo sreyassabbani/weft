@@ -61,12 +61,13 @@ semantics.
 ## Model
 
 A **vault** is found from the file being opened: the nearest ancestor
-directory containing `.obsidian`, else the nearest containing `.git`, `.jj` or
-`.hg`. A file with neither is handled alone, without scanning its directory.
+directory marked as a vault (an empty `.weft` file, or Obsidian's `.obsidian`
+folder), else the nearest containing `.git`, `.jj` or `.hg`. `.weft` lets a
+vault keep working once Obsidian is gone; it holds nothing. A file with neither is handled alone, without scanning its directory.
 The editor's `rootUri` is not trusted for this, since Helix reports the
 working directory when it finds no marker.
 
-In an Obsidian vault every non-hidden file is indexed, as Obsidian does. In a
+In a marked vault every non-hidden file is indexed, as Obsidian does. In a
 plain repository `.gitignore` is respected and only Markdown files are
 listed; an embed there is checked by looking for the file at its path. Only
 Markdown files are read. The walk finishes before the first request is

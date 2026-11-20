@@ -8,8 +8,9 @@ use crate::parse::{self, Kind, Link, Note, Segment};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Root {
-    /// A folder with `.obsidian`: every non-hidden file is part of it.
-    Obsidian,
+    /// A folder marked by a `.weft` file or an `.obsidian` folder: every
+    /// non-hidden file is part of it.
+    Vault,
     /// A repository: Markdown files not ignored by `.gitignore`.
     Repo,
     /// A file with no vault around it.
@@ -108,12 +109,14 @@ fn slug(text: &str) -> String {
         .collect()
 }
 
-/// Finds the vault containing `path`: the nearest ancestor with `.obsidian`,
-/// else the nearest with `.git`, `.jj` or `.hg`.
+/// Finds the vault containing `path`: the nearest ancestor marked as a vault
+/// (a `.weft` file or an `.obsidian` folder), else the nearest with `.git`,
+/// `.jj` or `.hg`.
 pub fn discover(path: &Path) -> (PathBuf, Root) {
     let parent = path.parent().unwrap_or(path);
-    if let Some(root) = parent.ancestors().find(|d| d.join(".obsidian").is_dir()) {
-        return (root.to_path_buf(), Root::Obsidian);
+    let marked = |d: &Path| d.join(".weft").is_file() || d.join(".obsidian").is_dir();
+    if let Some(root) = parent.ancestors().find(|d| marked(d)) {
+        return (root.to_path_buf(), Root::Vault);
     }
     for d in parent.ancestors() {
         if [".git", ".jj", ".hg"].iter().any(|m| d.join(m).exists()) {
@@ -151,7 +154,7 @@ impl Vault {
         let mut vault = Vault {
             root: PathBuf::from("/vault"),
             real_root: PathBuf::from("/vault"),
-            kind: Root::Obsidian,
+            kind: Root::Vault,
             files: BTreeMap::new(),
             index: Index::default(),
         };
@@ -174,7 +177,7 @@ impl Vault {
     fn walk(&self) -> Vec<String> {
         let mut builder = ignore::WalkBuilder::new(&self.root);
         builder.hidden(true).require_git(false);
-        if self.kind == Root::Obsidian {
+        if self.kind == Root::Vault {
             builder.git_ignore(false).git_global(false).git_exclude(false).ignore(false).parents(false);
         }
         let mut out = Vec::new();
@@ -183,7 +186,7 @@ impl Vault {
                 continue;
             }
             let Some(rel) = self.rel(entry.path()) else { continue };
-            if self.kind == Root::Obsidian || is_note(&rel) {
+            if self.kind == Root::Vault || is_note(&rel) {
                 out.push(rel);
             }
         }
@@ -348,10 +351,10 @@ impl Vault {
             .map_or(0, |d| d.as_secs())
     }
 
-    /// Outside an Obsidian vault only notes are listed; an embedded file is
+    /// Outside a marked vault only notes are listed; an embedded file is
     /// looked for on disk, from the root and from the note's folder.
     pub fn on_disk(&self, from: &str, link: &str) -> bool {
-        self.kind != Root::Obsidian
+        self.kind != Root::Vault
             && [normalize("", link), normalize(dir(from), &format!("./{link}"))]
                 .iter()
                 .any(|p| !p.is_empty() && self.path(p).is_file())
@@ -581,6 +584,30 @@ mod tests {
 
     fn file(s: &str) -> Dest {
         Dest::File(s.into())
+    }
+
+    #[test]
+    fn discovery() {
+        let tmp = std::env::temp_dir().join(format!("weft-discover-{}", std::process::id()));
+        let note = |d: &str| tmp.join(d).join("a.md");
+        for d in ["marked/sub", "obsidian/sub", "repo/sub", "nested/inner/sub", "lone"] {
+            std::fs::create_dir_all(tmp.join(d)).unwrap();
+        }
+        std::fs::write(tmp.join("marked/.weft"), "").unwrap();
+        std::fs::create_dir(tmp.join("obsidian/.obsidian")).unwrap();
+        std::fs::create_dir(tmp.join("repo/.git")).unwrap();
+        // The nearest marker wins: a marked vault inside a repository.
+        std::fs::create_dir(tmp.join("nested/.git")).unwrap();
+        std::fs::write(tmp.join("nested/inner/.weft"), "").unwrap();
+        // A folder named `.weft` is not the marker.
+        std::fs::create_dir(tmp.join("lone/.weft")).unwrap();
+
+        assert_eq!(discover(&note("marked/sub")), (tmp.join("marked"), Root::Vault));
+        assert_eq!(discover(&note("obsidian/sub")), (tmp.join("obsidian"), Root::Vault));
+        assert_eq!(discover(&note("repo/sub")), (tmp.join("repo"), Root::Repo));
+        assert_eq!(discover(&note("nested/inner/sub")), (tmp.join("nested/inner"), Root::Vault));
+        assert_ne!(discover(&note("lone")).1, Root::Vault);
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]
