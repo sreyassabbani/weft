@@ -1,5 +1,6 @@
 //! weft: a language server for Obsidian-style Markdown notes.
 
+pub mod changes;
 pub mod complete;
 pub mod ctx;
 pub mod diagnose;

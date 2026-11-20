@@ -1,9 +1,21 @@
+const HELP: &str = "usage: weft [lsp]                  run the language server (from an editor)
+       weft changes <since> <until>  list the notes changed in git history
+       weft --version";
+
 fn main() {
-    match std::env::args().nth(1).as_deref() {
-        None | Some("--stdio") => {}
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        None | Some("lsp" | "--stdio") => {}
         Some("--version" | "-V") => return println!("weft {}", env!("CARGO_PKG_VERSION")),
+        Some("changes") => {
+            if let Err(e) = weft::changes::main(&args[1..]) {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+            return;
+        }
         Some(_) => {
-            eprintln!("weft {}: a language server for Markdown notes.\nRun it from an editor; it speaks LSP over stdin and stdout.", env!("CARGO_PKG_VERSION"));
+            eprintln!("weft {}: a language server for Markdown notes.\n\n{HELP}", env!("CARGO_PKG_VERSION"));
             std::process::exit(2);
         }
     }

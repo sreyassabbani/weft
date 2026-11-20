@@ -24,6 +24,15 @@ discard the buffer with `:bc!` and rename again.
 
 It watches the vault itself and keeps nothing in it.
 
+## Change lists
+
+`weft changes <since> <until>` prints the notes created, modified and deleted
+in git commits over that range, as the `%% LIST CREATED %%`, `MODIFIED` and
+`DELETED` blocks obsidian-list-modified writes into daily notes. It only
+reads; a sync script can append its output to the day's note. `--into`
+names that note, and `--exclude` leaves out notes matching a
+`.gitignore`-style pattern, such as the daily notes themselves.
+
 ## Vaults
 
 The vault is the nearest folder marked as one, else the nearest containing
