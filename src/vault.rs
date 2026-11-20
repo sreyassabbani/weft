@@ -137,7 +137,7 @@ impl Vault {
     }
 
     /// A vault in memory, for tests.
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn from_files(files: &[(&str, &str)]) -> Vault {
         let mut vault = Vault {
             root: PathBuf::from("/vault"),
