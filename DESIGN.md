@@ -44,16 +44,17 @@ semantics.
 1. **Never write to disk.** The server reads files and returns edits. Renames
    are a `WorkspaceEdit` the editor applies. Obsidian can have the same vault
    open; the editor stays the only writer on this side.
-2. **No index to invalidate.** Each note is parsed into its headings, links,
-   block ids and aliases. Everything else (backlinks, resolution, diagnostics) is
-   computed from that on request. Parsing is a single pass over the lines; a
-   vault of tens of thousands of notes resolves in milliseconds.
+2. **Only parses are cached.** Each note is parsed into its headings, links,
+   block ids and aliases, and the parse is kept until the file changes (an
+   editor change, or a watcher event for a file not open). Everything else
+   (backlinks, resolution, diagnostics) is computed from the parses on
+   request. Parsing is a single pass over the lines.
 3. **No configuration.** Nothing is stored in the vault. Behavior follows
    Obsidian's defaults.
 4. **Only advertise what works.** Capabilities are limited to what Helix
    25.07 uses: completion, hover, definition, references, rename (with
    prepare), document and workspace symbols, diagnostics (pushed; 25.07 has
-   no pull diagnostics), code actions, and `workspace/willRenameFiles`. No
+   no pull diagnostics), and `workspace/willRenameFiles`. No
    document links, code lenses, semantic tokens or folding: Helix ignores
    them.
 
@@ -66,8 +67,14 @@ The editor's `rootUri` is not trusted for this, since Helix reports the
 working directory when it finds no marker.
 
 In an Obsidian vault every non-hidden file is indexed, as Obsidian does. In a
-plain repository `.gitignore` is respected. Only Markdown files are read;
-other files are known by path, so embeds can be checked and completed.
+plain repository `.gitignore` is respected and only Markdown files are
+listed; an embed there is checked by looking for the file at its path. Only
+Markdown files are read. The walk finishes before the first request is
+answered.
+
+Open buffers win over disk: while a note is open, watcher events for it are
+ignored and every range is computed from the buffer. A buffer for a file not
+on disk yet is a note like any other.
 
 weft runs on every Markdown file. In a code repository it behaves like
 Marksman over that repository's notes.
@@ -76,7 +83,7 @@ The cursor is always on one of:
 
 | Target | Where |
 |---|---|
-| note | the path part of a link; or anywhere that is not one of the rows below, meaning the note being edited |
+| note | the path part of a link; or anywhere that is not one of the rows below, meaning the note being edited. `[[#Heading]]` and `[[#^id]]` name the current note. |
 | heading | a heading line, or a `#Heading` part of a link |
 | block | a `^id` at the end of a block, or a `#^id` part of a link |
 
@@ -108,8 +115,12 @@ the vault and the full path from the root otherwise. That is Obsidian's
 default "shortest path when possible", so `11/16` is never written for
 `2026/11/16`.
 
-Heading comparison ignores case and punctuation, as Obsidian's does.
-`#A#B` means heading `B` under heading `A`.
+A link may carry `.md` (`[[Note.md]]`). Headings compare case-insensitively
+after the characters Obsidian strips from heading links (`# | ^ : % [ ]`) are
+turned into spaces and runs of space collapsed; `C` and `C++` stay distinct.
+`#A#B` means heading `B` under heading `A`, falling back to any heading `B`.
+A heading is only reported missing when nothing matches. A link to a heading
+counts as a reference to its note, as in Obsidian's backlinks.
 
 Frontmatter `aliases:` name the same note. `[[Neighbour Graphs]]` resolves to
 `Directional Edges.md` when that note lists the alias, and completion offers
@@ -129,7 +140,9 @@ Only things that are broken regardless of intent:
 - a heading or block that does not exist in a note that does;
 - an embedded attachment (`![[figure.png]]`) that does not exist.
 
-Links inside fenced code, inline code and `$$` math are not links. `[^1]` is
+Links inside frontmatter, fenced code, inline code and `$$` math are not
+links. Frontmatter is read for `aliases:` (and the older `alias:`) as a
+scalar, inline list or block list. `[^1]` is
 a footnote, not a block reference.
 
 ### Rename
@@ -140,8 +153,21 @@ rewritten in the generated form above. `textDocument/rename` on a note and
 `workspace/willRenameFiles` (Helix's `:move`) are both that function.
 
 Helix asks `willRenameFiles` again while applying a rename edit that contains
-a file rename (`Editor::move_path`). The server remembers the rename it just
-issued and answers that echo with nothing.
+a file rename (`Editor::move_path`). The server remembers the exact move it
+just issued and answers that one echo with nothing; the memory is cleared by
+the echo, by any other request, or after a few seconds.
+
+Safety, since Helix applies edits one by one and its file rename replaces an
+existing destination:
+
+- A rename whose destination exists (compared case-insensitively) is refused
+  with an error, as is a name containing a character Obsidian forbids.
+- Edits to open notes carry the buffer version; edits to closed notes are
+  computed from the file as read just before answering.
+- Every edited note is opened by Helix as a modified buffer. `:wa` writes
+  them; `:bc!` on one discards it. A pull landing between the answer and
+  `:wa` can still conflict; that is inherent to editor-applied edits and the
+  README says so.
 
 In the edit, text edits come first, addressed to the old paths, and the
 `RenameFile` last. A display alias is kept; the alias of a link written as
@@ -156,16 +182,23 @@ In the edit, text edits come first, addressed to the old paths, and the
   again on each keystroke, registers space and ASCII punctuation as trigger
   characters (outside a link these answer nothing), and sets each item's
   filter text to the query followed by the title so Helix's own filter keeps
-  the server's order (it breaks ties by index).
+  the server's order. Helix first sorts items by `sortText` (else label), so
+  each item carries its rank as `sortText`.
 - Workspace symbols are answered as flat `SymbolInformation`; Helix drops
   the nested form.
 - Helix applies edits to files that are not open by opening them as modified
   buffers. After a rename, `:wa` writes them.
 - Positions are negotiated as UTF-8 when offered, UTF-16 otherwise.
 - Helix has no file watcher for servers: it reports only files it writes
-  itself. weft watches the vault itself.
-- Helix applies `CreateFile` by writing an empty file, creating parent
-  folders.
+  itself. weft watches the vault itself, ignoring hidden folders (`.git`,
+  `.obsidian`, `.trash`), coalesces bursts (a pull touches many files) for
+  100 ms, re-reads what changed, and republishes diagnostics for every open
+  note, including empty lists to clear old ones.
+- Logging goes to stderr (Helix's `:log-open`), quiet unless `WEFT_LOG` is
+  set.
+- Go-to-definition on a note not written yet opens a new buffer at its
+  path. `:w!` writes it, creating its folder (`:w` does not create
+  folders).
 
 ## Structure
 
@@ -181,7 +214,7 @@ src/
   parse.rs      line scanner: frontmatter aliases, headings, links, blocks
   text.rs       positions and encodings
   target.rs     what the cursor is on
-  complete.rs   hover.rs  refs.rs  rename.rs  symbols.rs  diagnose.rs  action.rs
+  complete.rs   hover.rs  refs.rs  rename.rs  symbols.rs  diagnose.rs
   watch.rs      file system events
 ```
 
@@ -197,6 +230,8 @@ Frontmatter is read by hand for `aliases:` only; no YAML parser.
 - Markdown links beyond go-to-definition: no completion, references or
   rename.
 - Generating block ids. Existing `^ids` are completed.
+- A code action to create a note. `gd` already opens the new buffer, and
+  Helix's `CreateFile` would truncate a file created meanwhile.
 - A hint on links to notes not written yet. `end-of-line-diagnostics` would
   print one on every such line; hover says it instead.
 - Daily-note commands, templates, graph views.
@@ -214,8 +249,10 @@ Built in this order, each step committed with its tests:
    `atlas.design/` folders, aliases.
 3. `server`: initialize (encoding, capabilities), document sync
    (incremental), the select loop, `watch`.
-4. Handlers: definition, hover, references, completion, symbols,
-   diagnostics, code action, rename and `willRenameFiles`.
+4. Handlers: definition, hover (note: path, aliases, backlink count and the
+   opening lines or the heading's section; unwritten: "not written yet ·
+   linked from N notes"), references, completion, symbols, diagnostics,
+   rename and `willRenameFiles`.
 5. README, `flake.nix`-free packaging in `~/config` (`pkgs/weft.nix` built
    with `rustPlatform.buildRustPackage` from a `git+file` input, so `target/`
    is never copied), the Helix language entry.
@@ -224,10 +261,15 @@ Tests:
 
 - Unit tests per module; protocol tests drive the server through an
   in-memory `lsp-server` connection over a fixture vault.
+- A fixture vault with expected targets for each link: colliding basenames,
+  aliases against real titles, `[[#Heading]]`, block ids, `C` against `C++`,
+  `[[Note.md]]`.
 - Vault tests, run when `WEFT_TEST_VAULT` points at a copy of a real vault:
-  every note parses; resolution matches an independent count of unresolved
-  targets; for every note and every heading, a simulated rename leaves every
-  link resolving to the same file and heading as before.
+  every note parses; a spot-check list of links resolves to the exact files
+  and headings Obsidian shows; for every note and every heading, a simulated
+  rename, applied to the vault, leaves every wikilink (including links from
+  the moved note and links shadowed by the new name) resolving to the same
+  file and heading as before.
 - By hand in Helix 25.07.1, against the copy: completion on multi-word
   titles with punctuation, `gd` on a note link, a heading link and an
   unwritten note, `gr`, rename of a note and of a heading, hover.
