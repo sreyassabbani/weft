@@ -15,11 +15,18 @@ result is a few pieces with clear jobs and not a pile of scripts.
 |---|---|
 | obsidian-git | Every 30 min: commit all changes as `vault backup: <date>`, with the changed files in the body. Pull (merge) before push, then push. Pull when Obsidian starts. Commits are signed. Runs only while Obsidian is open. |
 | obsidian-list-modified | Keeps three blocks in the daily note, `LIST CREATED`, `LIST MODIFIED`, `LIST DELETED`, each a list of `[[links]]` to notes touched that day. Attachments and `.obsidian/` are excluded. |
-| daily notes | `⌘D` opens `YYYY/MM/DD.md` at the vault root, creating it empty. Done: `space D` in Helix, from `.helix/config.toml` in the vault. |
+| daily notes | `⌘D` opens `YYYY/MM/DD.md` at the vault root, creating it empty. Done: `space d` in Helix, from `.helix/config.toml` in the vault. |
+| pasting images | Saves to `attachments/Pasted image <timestamp>.png` and embeds it. Done: `space i`, a vault script reading the clipboard. |
+| saving | Saves as you type. Done: Helix auto-save, set in the vault only. |
 
-Given up with Obsidian, on purpose: the graph, Bases (`Evergreen.base` stays
-as a file but nothing reads it), rendered images (open them with Quick Look),
-tab groups.
+Given up with Obsidian, on purpose: the graph, Bases (`.base` files stay but
+nothing reads them), rendered images (open them with Quick Look), tab groups,
+tags, canvas, themes and CSS, note composer, copy-path and delete-file keys.
+
+The graph in particular is not coming back in weft. It is a picture of the
+notes more than a way to work with them, it costs screen space, and it is the
+wrong model for what these notes are. The test for any feature here is
+whether it helps thinking and writing, not whether it shows the vault off.
 
 ## Principle: each piece lives where its reason to change lives
 
@@ -107,33 +114,24 @@ make a public tool carry one person's backup habits.
 
 ### The vault
 
-`.helix/config.toml` keeps `space D`; it switches to `weft today` once that
-exists. `.weft` is added; `.obsidian/` is deleted.
+`.helix/config.toml` keeps `space d`, `space i` and auto-save; `space d`
+switches to `weft today` once that exists. `.weft` is added; `.obsidian/` is deleted.
 
-## The decision that shapes the rest: daily change lists
+## Daily change lists (decided: keep writing them)
 
-Today each daily note ends with lists of the notes you created and modified
-that day, as `[[links]]`. Those links have a side effect: they make the daily
-note link to every note you touched.
+Each daily note ends with lists of the notes created, modified and deleted
+that day, as `[[links]]`. Those links also make the days you worked on a note
+show up when you run `gr` on it.
 
-In Helix, `gr` lists references to what is under the cursor. In code that is
-a variable. With weft, in a note it is the note itself (or the heading or
-link under the cursor), so `gr` lists every note that links to this one. A
-daily note whose list includes `[[Carding everything]]` therefore shows up in
-`gr` from `Carding everything.md`, and the days you worked on a note appear
-among its references.
+The sync job, on its first run each day, writes the lists for every finished
+day since the last run into that day's note, using `weft changes`, creating
+the note if it does not exist (as list-modified does). Only finished days are
+written, so a note you have open is never touched. The difference from
+list-modified: today's lists appear tomorrow, not live.
 
-**A. Keep writing the lists.** The sync job, on its first run each day, writes
-yesterday's lists into yesterday's note using `weft changes`. Only finished
-days are written, so a note you have open is never touched. Daily notes look
-the way they do now, and the days keep showing in `gr`.
-
-**B. Stop writing them.** git already records which notes changed when. weft
-shows it on demand instead, for example a hover line "edited Nov 19, Nov 14,
-Oct 2". Nothing is generated into your notes. The days no longer show in
-`gr`.
-
-The lists already written stay either way.
+The alternative considered was to stop writing lists and have weft show a
+note's edit dates on hover, from git, so nothing would be generated into the
+notes. Rejected: the lists are wanted in the notes themselves.
 
 ## Risks to check before building
 
@@ -153,11 +151,9 @@ The lists already written stay either way.
 3. `~/config`: the sync job, tested with signing.
 4. Switch over: add `.weft`, quit Obsidian, run on the job for a few days,
    then delete Obsidian and `.obsidian/`.
-5. weft: `weft today` and `weft changes`, then build A or B.
+5. weft: `weft today` and `weft changes`; the sync job writes the lists.
 
 ## Open questions
 
-1. Change lists: A (keep writing them) or B (derive from git)?
-2. `.weft` as the vault marker: fine, or a different name?
-3. Is the plan document's home right? It sits in weft's public repo because
+1. Is the plan document's home right? It sits in weft's public repo because
    most of what it proposes is weft's.
