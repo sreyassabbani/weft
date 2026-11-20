@@ -1,6 +1,9 @@
 # Notes workflow without Obsidian (plan)
 
-Status: draft, open for discussion. Nothing here is built yet.
+Status: built, except the switch-over. Done: the `.weft` marker, `weft
+changes`, and in `~/config` the `home/weft.nix` module with `weft-sync`
+(sync and change lists). Not built: `weft today`, since `space d` already
+works without it.
 
 The goal is to delete Obsidian entirely. weft today is a language server. To
 get there, a few more things have to exist somewhere: the git sync that
