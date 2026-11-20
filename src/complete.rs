@@ -74,13 +74,29 @@ pub fn complete(cx: &Ctx, rel: &str, pos: Position) -> Option<CompletionList> {
         }
         None => (open + 2, query, note_candidates(cx, embed, rel, line_no as u32, open as u32)),
     };
+    // What is already after the cursor, such as the closing quote Helix
+    // auto-paired in `[["quoted|"]]`.
+    let tail = &line[byte..end];
     // A finished link: Helix asks again after accepting an item when the
     // name ends in punctuation; there is nothing left to offer.
-    if close.is_some() && candidates.iter().any(|c| c.insert == needle) {
+    if close.is_some() && candidates.iter().any(|c| c.insert == format!("{needle}{tail}")) {
         return None;
     }
     let ranges = (cx.range(rel, Span::new(line_no, start, byte)), cx.range(rel, Span::new(line_no, start, end)));
-    Some(CompletionList { is_incomplete: true, items: rank(needle, query, candidates, ranges, closing) })
+    let mut items = rank(needle, query, candidates, ranges, closing);
+    // An item ending with that text inserts only what comes before it, and
+    // leaves the rest in place.
+    if !tail.is_empty() {
+        for item in &mut items {
+            if let Some(CompletionTextEdit::InsertAndReplace(e)) = &mut item.text_edit {
+                if let Some(head) = e.new_text.strip_suffix(tail) {
+                    e.new_text = head.to_string();
+                    e.replace = e.insert;
+                }
+            }
+        }
+    }
+    Some(CompletionList { is_incomplete: true, items })
 }
 
 /// `at` is where the link being typed starts; it is not a note of its own.
@@ -249,6 +265,7 @@ mod tests {
             ("Can combinatorics be explained entirely physically?.md", ""),
             ("Combinatorics.md", "# Combinatorics\n## Hard puzzles\npara ^p1\n"),
             ("Aren't we just going round?.md", ""),
+            ("\"quoted text with some words\".md", ""),
             ("2026/11/14.md", ""),
             ("2026/10/14.md", ""),
             ("Directional Edges.md", "---\naliases:\n  - Neighbour Graphs\n---\n"),
@@ -291,6 +308,10 @@ mod tests {
         let got = items("[[Combi|the hard one]]", 4);
         assert_eq!(got[0].1, "Combinatorics");
         assert_eq!((got[0].2.end, got[0].3.end), (Position::new(0, 4), Position::new(0, 7)));
+        // An auto-paired quote after the cursor closes the title.
+        let got = items("[[\"quoted\"]]", 9);
+        assert_eq!((got[0].1.as_str(), got[0].3.end), ("\"quoted text with some words", Position::new(0, 9)));
+        assert!(items("[[\"quoted text with some words\"]]", 30).is_empty());
         // After accepting, Helix asks again; a finished name gets nothing.
         assert!(items("[[Aren't we just going round?]]", 29).is_empty());
         let got = items("[[Neighbour", 11);
