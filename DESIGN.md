@@ -100,8 +100,8 @@ not been written yet. Such a note:
 - has references (every link that names it) and can be renamed;
 - says so on hover, with the number of notes linking to it;
 - opens as a new, unsaved buffer on go-to-definition, at the path Obsidian
-  would create it. Nothing exists on disk until it is written. A code action
-  creates the empty file without leaving the current note.
+  would create it: the path in the link, else the vault root. Nothing exists
+  on disk until it is written.
 
 ### Link resolution
 
