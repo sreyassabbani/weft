@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionList, CompletionTextEdit, Position, Range, TextEdit,
+    CompletionItem, CompletionItemKind, CompletionList, CompletionTextEdit, InsertReplaceEdit, Position, Range,
 };
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -51,25 +51,30 @@ pub fn complete(cx: &Ctx, rel: &str, pos: Position) -> Option<CompletionList> {
     }
     let embed = open > 0 && line.as_bytes()[open - 1] == b'!';
 
-    // What to replace after the cursor: up to an alias or heading part that
-    // is already there, else through the closing brackets.
+    // Helix moves the cursor to the start of an edit that reaches past it, so
+    // the edit inserts up to the cursor. In replace mode it also replaces the
+    // rest of the name, up to an alias or heading part or the closing `]]`.
+    // Closing brackets are added only when missing: Helix auto-pairs them.
     let after = &line[byte..];
     let close = after.find("]]").filter(|&c| !after[..c].contains("[["));
     let stop: &[char] = if query.contains('#') { &['|'] } else { &['|', '#'] };
     let (end, closing) = match close {
-        Some(c) => match after[..c].find(stop) {
-            Some(k) => (byte + k, ""),
-            None => (byte + c + 2, "]]"),
-        },
+        Some(c) => (byte + after[..c].find(stop).unwrap_or(c), ""),
         None => (byte, "]]"),
     };
-    let range = cx.range(rel, Span::new(line_no as usize, open + 2, end));
+    let line_no = line_no as usize;
+    let ranges = (cx.range(rel, Span::new(line_no, open + 2, byte)), cx.range(rel, Span::new(line_no, open + 2, end)));
 
     let (needle, candidates) = match query.find('#') {
         Some(h) => (query.rsplit('#').next().unwrap_or(""), sub_candidates(cx, rel, &query[..h], &query[h + 1..])?),
-        None => (query, note_candidates(cx, embed, rel, line_no, open as u32)),
+        None => (query, note_candidates(cx, embed, rel, line_no as u32, open as u32)),
     };
-    Some(CompletionList { is_incomplete: true, items: rank(needle, query, candidates, range, closing) })
+    // A finished link: Helix asks again after accepting an item when the
+    // name ends in punctuation; there is nothing left to offer.
+    if close.is_some() && candidates.iter().any(|c| c.insert == query) {
+        return None;
+    }
+    Some(CompletionList { is_incomplete: true, items: rank(needle, query, candidates, ranges, closing) })
 }
 
 /// `at` is where the link being typed starts; it is not a note of its own.
@@ -164,7 +169,13 @@ fn sub_candidates(cx: &Ctx, rel: &str, path: &str, sub: &str) -> Option<Vec<Cand
     Some(out)
 }
 
-fn rank(needle: &str, query: &str, candidates: Vec<Candidate>, range: Range, closing: &str) -> Vec<CompletionItem> {
+fn rank(
+    needle: &str,
+    query: &str,
+    candidates: Vec<Candidate>,
+    (insert, replace): (Range, Range),
+    closing: &str,
+) -> Vec<CompletionItem> {
     let pattern = Pattern::parse(needle, CaseMatching::Ignore, Normalization::Smart);
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
     let mut buf = Vec::new();
@@ -195,7 +206,11 @@ fn rank(needle: &str, query: &str, candidates: Vec<Candidate>, range: Range, clo
             // the order below holds.
             filter_text: Some(format!("{query} {}", c.label)),
             sort_text: Some(format!("{i:04}")),
-            text_edit: Some(CompletionTextEdit::Edit(TextEdit::new(range, format!("{}{closing}", c.insert)))),
+            text_edit: Some(CompletionTextEdit::InsertAndReplace(InsertReplaceEdit {
+                new_text: format!("{}{closing}", c.insert),
+                insert,
+                replace,
+            })),
             label: c.label,
             detail: c.detail,
             kind: Some(c.kind),
@@ -223,13 +238,14 @@ mod tests {
         ])
     }
 
-    fn items(current: &str, col: u32) -> Vec<(String, String, Range)> {
+    /// (label, new text, insert range, replace range)
+    fn items(current: &str, col: u32) -> Vec<(String, String, Range, Range)> {
         let v = vault(current);
         let cx = Ctx { vault: &v, enc: Encoding::Utf8 };
         let list = complete(&cx, "x.md", Position::new(0, col)).map(|l| l.items).unwrap_or_default();
         list.into_iter()
             .map(|i| match i.text_edit {
-                Some(CompletionTextEdit::Edit(e)) => (i.label, e.new_text, e.range),
+                Some(CompletionTextEdit::InsertAndReplace(e)) => (i.label, e.new_text, e.insert, e.replace),
                 _ => unreachable!(),
             })
             .collect()
@@ -241,6 +257,7 @@ mod tests {
         let got = items(text, text.len() as u32);
         assert_eq!(got[0].1, "Can combinatorics be explained entirely physically?]]");
         assert_eq!(got[0].2, Range::new(Position::new(0, 6), Position::new(0, 16)));
+        assert_eq!(got[0].3, got[0].2);
         let text = "[[Aren't we";
         assert_eq!(items(text, text.len() as u32)[0].0, "Aren't we just going round?");
     }
@@ -249,12 +266,14 @@ mod tests {
     fn closing_brackets_and_aliases() {
         // Helix auto-pairs brackets: `[[]]` with the cursor in the middle.
         let got = items("[[Combi]]", 7);
-        assert_eq!(got[0].1, "Combinatorics]]");
-        assert_eq!(got[0].2.end, Position::new(0, 9));
-        // An alias already there is kept.
-        let got = items("[[Combi|the hard one]]", 7);
         assert_eq!(got[0].1, "Combinatorics");
-        assert_eq!(got[0].2.end, Position::new(0, 7));
+        assert_eq!((got[0].2.end, got[0].3.end), (Position::new(0, 7), Position::new(0, 7)));
+        // In replace mode the rest of the name goes; an alias stays.
+        let got = items("[[Combi|the hard one]]", 4);
+        assert_eq!(got[0].1, "Combinatorics");
+        assert_eq!((got[0].2.end, got[0].3.end), (Position::new(0, 4), Position::new(0, 7)));
+        // After accepting, Helix asks again; a finished name gets nothing.
+        assert!(items("[[Aren't we just going round?]]", 29).is_empty());
         let got = items("[[Neighbour", 11);
         assert_eq!(got[0].1, "Directional Edges|Neighbour Graphs]]");
     }
