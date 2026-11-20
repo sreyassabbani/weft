@@ -1,18 +1,3 @@
-//! weft: a language server for Obsidian-style Markdown notes.
-
-mod complete;
-mod ctx;
-mod diagnose;
-mod hover;
-mod parse;
-mod refs;
-mod rename;
-mod server;
-mod symbols;
-mod target;
-mod text;
-mod vault;
-
 fn main() {
     match std::env::args().nth(1).as_deref() {
         None | Some("--stdio") => {}
@@ -23,7 +8,7 @@ fn main() {
         }
     }
     let (conn, io) = lsp_server::Connection::stdio();
-    let result = server::run(conn);
+    let result = weft::server::run(conn);
     io.join().ok();
     if let Err(e) = result {
         eprintln!("weft: {e}");
