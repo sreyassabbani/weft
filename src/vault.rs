@@ -39,6 +39,13 @@ pub struct Vault {
     pub kind: Root,
     /// Paths from the root, with `/` separators and extensions.
     pub files: BTreeMap<String, File>,
+    pub index: Index,
+}
+
+/// The names in a vault, for resolving links. Built from paths alone, so it
+/// can also describe the vault as it will be after a move.
+#[derive(Default)]
+pub struct Index {
     lower: HashMap<String, String>,
     /// Link name (stem for notes, file name otherwise), lowercased, to paths.
     names: HashMap<String, Vec<String>>,
@@ -115,8 +122,7 @@ impl Vault {
             root,
             kind,
             files: BTreeMap::new(),
-            lower: HashMap::new(),
-            names: HashMap::new(),
+            index: Index::default(),
         };
         let paths = match (kind, only) {
             (Root::Single, Some(only)) => vec![only.to_string()],
@@ -136,8 +142,7 @@ impl Vault {
             root: PathBuf::from("/vault"),
             kind: Root::Obsidian,
             files: BTreeMap::new(),
-            lower: HashMap::new(),
-            names: HashMap::new(),
+            index: Index::default(),
         };
         for (path, text) in files {
             let md = is_note(path);
@@ -189,12 +194,7 @@ impl Vault {
     }
 
     fn reindex(&mut self) {
-        self.lower.clear();
-        self.names.clear();
-        for rel in self.files.keys() {
-            self.lower.insert(rel.to_lowercase(), rel.clone());
-            self.names.entry(link_name(rel).to_lowercase()).or_default().push(rel.clone());
-        }
+        self.index = Index::build(self.files.keys().cloned());
     }
 
     pub fn path(&self, rel: &str) -> PathBuf {
@@ -229,7 +229,15 @@ impl Vault {
     }
 
     pub fn exists(&self, rel: &str) -> bool {
-        self.lower.contains_key(&rel.to_lowercase())
+        self.index.lower.contains_key(&rel.to_lowercase())
+    }
+
+    pub fn resolve(&self, from: &str, link: &str) -> Dest {
+        self.index.resolve(from, link)
+    }
+
+    pub fn link_text(&self, rel: &str) -> String {
+        self.index.link_text(rel)
     }
 
     pub fn open(&mut self, rel: &str, text: String, version: i32) {
@@ -310,6 +318,49 @@ impl Vault {
         changed
     }
 
+    /// Where a note not written yet would be created, from the root.
+    pub fn create_path(&self, from: &str, link: &str) -> Option<String> {
+        let path = normalize(dir(from), link);
+        if path.is_empty() || is_attachment(&path) {
+            return None;
+        }
+        Some(if is_note(&path) { path } else { format!("{path}.md") })
+    }
+
+    /// Seconds since the epoch the file last changed on disk; 0 if unknown.
+    pub fn modified(&self, rel: &str) -> u64 {
+        self.files
+            .get(rel)
+            .and_then(|f| f.stamp)
+            .and_then(|(t, _)| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs())
+    }
+
+    /// Outside an Obsidian vault only notes are listed; an embedded file is
+    /// looked for on disk, from the root and from the note's folder.
+    pub fn on_disk(&self, from: &str, link: &str) -> bool {
+        self.kind != Root::Obsidian
+            && [normalize("", link), normalize(dir(from), &format!("./{link}"))]
+                .iter()
+                .any(|p| !p.is_empty() && self.path(p).is_file())
+    }
+
+    /// Whether `rel` is taken by a file other than `except`.
+    pub fn name_taken(&self, rel: &str, except: &str) -> bool {
+        self.index.lower.get(&rel.to_lowercase()).is_some_and(|r| r != except)
+    }
+}
+
+impl Index {
+    pub fn build(paths: impl Iterator<Item = String>) -> Index {
+        let mut index = Index::default();
+        for rel in paths {
+            index.lower.insert(rel.to_lowercase(), rel.clone());
+            index.names.entry(link_name(&rel).to_lowercase()).or_default().push(rel);
+        }
+        index
+    }
+
     /// Resolves the path part of a link written in `from`.
     pub fn resolve(&self, from: &str, link: &str) -> Dest {
         if link.is_empty() {
@@ -366,37 +417,6 @@ impl Vault {
         }
     }
 
-    /// Where a note not written yet would be created, from the root.
-    pub fn create_path(&self, from: &str, link: &str) -> Option<String> {
-        let path = normalize(dir(from), link);
-        if path.is_empty() || is_attachment(&path) {
-            return None;
-        }
-        Some(if is_note(&path) { path } else { format!("{path}.md") })
-    }
-
-    /// Seconds since the epoch the file last changed on disk; 0 if unknown.
-    pub fn modified(&self, rel: &str) -> u64 {
-        self.files
-            .get(rel)
-            .and_then(|f| f.stamp)
-            .and_then(|(t, _)| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs())
-    }
-
-    /// Outside an Obsidian vault only notes are listed; an embedded file is
-    /// looked for on disk, from the root and from the note's folder.
-    pub fn on_disk(&self, from: &str, link: &str) -> bool {
-        self.kind != Root::Obsidian
-            && [normalize("", link), normalize(dir(from), &format!("./{link}"))]
-                .iter()
-                .any(|p| !p.is_empty() && self.path(p).is_file())
-    }
-
-    /// Whether `name` is taken by a file other than `except`.
-    pub fn name_taken(&self, rel: &str, except: &str) -> bool {
-        self.lower.get(&rel.to_lowercase()).is_some_and(|r| r != except)
-    }
 }
 
 /// Orders candidates for a name: same folder, shallowest, alphabetical.

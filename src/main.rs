@@ -4,6 +4,7 @@ mod diagnose;
 mod hover;
 mod parse;
 mod refs;
+mod rename;
 mod symbols;
 mod target;
 mod text;
