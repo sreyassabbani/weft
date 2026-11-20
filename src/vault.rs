@@ -136,7 +136,8 @@ impl Vault {
         vault
     }
 
-    /// An empty vault, for tests.
+    /// A vault in memory, for tests.
+    #[cfg(test)]
     pub fn from_files(files: &[(&str, &str)]) -> Vault {
         let mut vault = Vault {
             root: PathBuf::from("/vault"),
@@ -226,10 +227,6 @@ impl Vault {
     /// Notes, with their parses.
     pub fn notes(&self) -> impl Iterator<Item = (&String, &Note)> {
         self.files.iter().filter(|(_, f)| f.text.is_some()).map(|(p, f)| (p, &f.note))
-    }
-
-    pub fn exists(&self, rel: &str) -> bool {
-        self.index.lower.contains_key(&rel.to_lowercase())
     }
 
     pub fn resolve(&self, from: &str, link: &str) -> Dest {

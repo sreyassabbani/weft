@@ -32,7 +32,6 @@ pub struct Link {
     pub path_span: Span,
     /// Headings after `#`, or a single block id after `#^`.
     pub subpath: Vec<Segment>,
-    pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -276,12 +275,9 @@ fn wikilinks(n: usize, line: &str, code: &[(usize, usize)], out: &mut Vec<Link>)
 fn wikilink(n: usize, line: &str, start: usize, inner: usize, close: usize, embed: bool) -> Link {
     let content = &line[inner..close];
     // The alias starts at the first `|`; in tables it is written `\|`.
-    let (target_end, alias) = match content.find('|') {
-        Some(bar) => {
-            let end = if content[..bar].ends_with('\\') { bar - 1 } else { bar };
-            (inner + end, Some(content[bar + 1..].trim().to_string()))
-        }
-        None => (close, None),
+    let target_end = match content.find('|') {
+        Some(bar) => inner + if content[..bar].ends_with('\\') { bar - 1 } else { bar },
+        None => close,
     };
     let target = &line[inner..target_end];
     let hash = target.find('#').map_or(target_end, |h| inner + h);
@@ -311,7 +307,6 @@ fn wikilink(n: usize, line: &str, start: usize, inner: usize, close: usize, embe
         path,
         path_span,
         subpath,
-        alias,
     }
 }
 
@@ -401,7 +396,6 @@ fn markdown_links(n: usize, line: &str, code: &[(usize, usize)], out: &mut Vec<L
             path: decode(path_raw),
             path_span: Span::new(n, dest_a, dest_a + path_raw.len()),
             subpath,
-            alias: Some(line[open + 1..mid].to_string()),
         });
     }
 }
@@ -436,7 +430,6 @@ mod tests {
         assert_eq!(l.path, "Array");
         let subs: Vec<_> = l.subpath.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(subs, ["C++", "Dynamic Allocation"]);
-        assert_eq!(l.alias.as_deref(), Some("vectors"));
         assert_eq!((l.span.start, l.span.end), (4, 44));
         assert_eq!((l.path_span.start, l.path_span.end), (6, 11));
     }
@@ -453,7 +446,6 @@ mod tests {
         let l = &links("![[Screenshot 2026-01-02 at 3.04.05 PM.png|313]] [[2026/11/14]]");
         assert!(l[0].embed);
         assert_eq!(l[0].path, "Screenshot 2026-01-02 at 3.04.05 PM.png");
-        assert_eq!(l[0].alias.as_deref(), Some("313"));
         assert!(!l[1].embed);
         assert_eq!(l[1].path, "2026/11/14");
     }
@@ -473,7 +465,7 @@ mod tests {
     fn table_pipe() {
         let l = &links(r"| [[Note\|alias]] |");
         assert_eq!(l[0].path, "Note");
-        assert_eq!(l[0].alias.as_deref(), Some("alias"));
+        assert_eq!((l[0].path_span.start, l[0].path_span.end), (4, 8));
     }
 
     #[test]
