@@ -370,6 +370,11 @@ impl Server {
                         return null;
                     }
                 }
+                for (old, new) in &files {
+                    if self.vault_of(old) != self.vault_of(new) {
+                        log!("{old} is moving out of its vault; links to it are not rewritten");
+                    }
+                }
                 let Some((old, _)) = files.first() else { return null };
                 let Some(i) = self.vault_of(old) else { return null };
                 self.vaults[i].rescan();

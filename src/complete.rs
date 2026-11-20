@@ -15,6 +15,7 @@ use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::ctx::Ctx;
+use crate::parse::Segment;
 use crate::text::{Span, split_lines};
 use crate::vault::{self, Dest};
 
@@ -63,17 +64,22 @@ pub fn complete(cx: &Ctx, rel: &str, pos: Position) -> Option<CompletionList> {
         None => (byte, "]]"),
     };
     let line_no = line_no as usize;
-    let ranges = (cx.range(rel, Span::new(line_no, open + 2, byte)), cx.range(rel, Span::new(line_no, open + 2, end)));
 
-    let (needle, candidates) = match query.find('#') {
-        Some(h) => (query.rsplit('#').next().unwrap_or(""), sub_candidates(cx, rel, &query[..h], &query[h + 1..])?),
-        None => (query, note_candidates(cx, embed, rel, line_no as u32, open as u32)),
+    // After `#`, only the last heading (or block) is completed; the note and
+    // any parent headings stay as written.
+    let (start, needle, candidates) = match query.find('#') {
+        Some(h) => {
+            let last = query.rfind('#').unwrap() + 1;
+            (open + 2 + last, &query[last..], sub_candidates(cx, rel, &query[..h], &query[h + 1..])?)
+        }
+        None => (open + 2, query, note_candidates(cx, embed, rel, line_no as u32, open as u32)),
     };
     // A finished link: Helix asks again after accepting an item when the
     // name ends in punctuation; there is nothing left to offer.
-    if close.is_some() && candidates.iter().any(|c| c.insert == query) {
+    if close.is_some() && candidates.iter().any(|c| c.insert == needle) {
         return None;
     }
+    let ranges = (cx.range(rel, Span::new(line_no, start, byte)), cx.range(rel, Span::new(line_no, start, end)));
     Some(CompletionList { is_incomplete: true, items: rank(needle, query, candidates, ranges, closing) })
 }
 
@@ -136,16 +142,29 @@ fn note_candidates(cx: &Ctx, embed: bool, current: &str, line: u32, at: u32) -> 
 }
 
 /// Headings (`[[Note#`) or block ids (`[[Note#^`) of the note being linked.
+/// `sub` is everything after the first `#`; headings before the last `#`
+/// narrow the list to those under them.
 fn sub_candidates(cx: &Ctx, rel: &str, path: &str, sub: &str) -> Option<Vec<Candidate>> {
     let Dest::File(file) = cx.vault.resolve(rel, path) else { return Some(Vec::new()) };
     let note = cx.vault.note(&file)?;
     let blocks = sub.rsplit('#').next().is_some_and(|s| s.starts_with('^'));
+    let parents: Vec<Segment> = sub
+        .rsplit_once('#')
+        .map(|(p, _)| p.split('#').map(|t| Segment { text: t.into(), span: Span::default(), block: false }).collect())
+        .unwrap_or_default();
+    let under = match parents.is_empty() {
+        true => 0..note.headings.len(),
+        false => {
+            let p = vault::find_heading_path(note, &parents)?;
+            p + 1..vault::section(note, p).end
+        }
+    };
     let out = if blocks {
         note.blocks
             .iter()
             .map(|b| Candidate {
                 label: format!("^{}", b.id),
-                insert: format!("{path}#^{}", b.id),
+                insert: format!("^{}", b.id),
                 hay: format!("^{}", b.id),
                 detail: None,
                 kind: CompletionItemKind::REFERENCE,
@@ -153,12 +172,12 @@ fn sub_candidates(cx: &Ctx, rel: &str, path: &str, sub: &str) -> Option<Vec<Cand
             })
             .collect()
     } else {
-        note.headings
+        note.headings[under]
             .iter()
             .filter(|h| !h.text.is_empty())
             .map(|h| Candidate {
                 label: h.text.clone(),
-                insert: format!("{path}#{}", h.text),
+                insert: vault::heading_in_link(&h.text),
                 hay: h.text.clone(),
                 detail: Some("#".repeat(h.level as usize)),
                 kind: CompletionItemKind::REFERENCE,
@@ -289,12 +308,18 @@ mod tests {
     #[test]
     fn headings_and_blocks() {
         let got = items("[[Combinatorics#hard", 20);
-        assert_eq!(got[0].1, "Combinatorics#Hard puzzles]]");
+        assert_eq!(got[0].1, "Hard puzzles]]");
+        assert_eq!(got[0].2.start, Position::new(0, 16));
         let got = items("[[Combinatorics#^", 17);
-        assert_eq!(got[0].1, "Combinatorics#^p1]]");
+        assert_eq!(got[0].1, "^p1]]");
         // `^` and `!` are text, not query syntax.
         let got = items("[[Combinatorics#^p", 18);
-        assert_eq!(got[0].1, "Combinatorics#^p1]]");
+        assert_eq!(got[0].1, "^p1]]");
+        // Under a parent: only its headings, and the parent stays.
+        let got = items("[[Combinatorics#Combinatorics#", 30);
+        assert_eq!(got.iter().map(|g| g.0.as_str()).collect::<Vec<_>>(), ["Hard puzzles"]);
+        assert_eq!(got[0].2.start, Position::new(0, 30));
+        assert!(items("[[Combinatorics#Hard puzzles]]", 28).is_empty());
         assert!(items("text [[a]] more", 15).is_empty());
         assert!(items("[[Combi|al", 10).is_empty());
     }

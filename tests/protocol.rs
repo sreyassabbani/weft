@@ -16,6 +16,10 @@ struct Client {
 
 impl Client {
     fn start(files: &[(&str, &str)]) -> Client {
+        Client::start_with(files, &["utf-8", "utf-16"])
+    }
+
+    fn start_with(files: &[(&str, &str)], encodings: &[&str]) -> Client {
         let root = std::env::temp_dir()
             .join(format!("weft-test-{}-{}", std::process::id(), rand_suffix()))
             .canonicalize_parent();
@@ -28,9 +32,10 @@ impl Client {
         let (server, conn) = Connection::memory();
         std::thread::spawn(move || weft::server::run(server).unwrap());
         let mut client = Client { conn, next: 0, notifications: Vec::new(), root };
-        let caps = json!({ "general": { "positionEncodings": ["utf-8", "utf-16"] } });
+        let caps = json!({ "general": { "positionEncodings": encodings } });
         let init = client.request("initialize", json!({ "capabilities": caps, "processId": null, "rootUri": null }));
-        assert_eq!(init["capabilities"]["positionEncoding"], "utf-8");
+        let want = if encodings.contains(&"utf-8") { "utf-8" } else { "utf-16" };
+        assert_eq!(init["capabilities"]["positionEncoding"], want);
         client.notify("initialized", json!({}));
         client
     }
@@ -258,4 +263,56 @@ fn rename_sees_the_disk_as_it_is_now() {
     assert_eq!(range_in("Pulled.md").unwrap()["start"], json!({ "line": 2, "character": 2 }));
     // Helix drops the byte order mark when it loads the file.
     assert_eq!(range_in("Bom.md").unwrap(), json!({ "start": { "line": 0, "character": 2 }, "end": { "line": 0, "character": 7 } }));
+}
+
+#[test]
+fn markdown_links_answer_definition() {
+    let mut c = Client::start(&[
+        ("docs/Guide.md", "# Intro\n## Some Part\n"),
+        ("README.md", "See [the guide](docs/Guide.md#some-part), [web](https://example.org), [gone](nope.md).\n"),
+    ]);
+    c.open("README.md");
+    let def = c.request("textDocument/definition", c.at("README.md", 0, 8));
+    assert_eq!(def["uri"], c.uri("docs/Guide.md"));
+    assert_eq!(def["range"]["start"], json!({ "line": 1, "character": 3 }));
+    assert_eq!(c.request("textDocument/definition", c.at("README.md", 0, 45)), Value::Null);
+    assert_eq!(c.request("textDocument/definition", c.at("README.md", 0, 75)), Value::Null);
+}
+
+#[test]
+fn utf16_positions() {
+    // Curly quotes and an emoji before the link: columns differ by encoding.
+    let mut c = Client::start_with(&[("Note.md", "“Quote” 🙂 [[Array]]\n"), ("Array.md", "")], &["utf-16"]);
+    c.open("Note.md");
+    // UTF-16: “ Quote ” space = 8 units, emoji = 2, space = 1 → link at 11.
+    let def = c.request("textDocument/definition", c.at("Note.md", 0, 14));
+    assert_eq!(def["uri"], c.uri("Array.md"));
+    let refs = c.request(
+        "textDocument/references",
+        json!({ "textDocument": { "uri": c.uri("Note.md") }, "position": { "line": 0, "character": 14 }, "context": { "includeDeclaration": false } }),
+    );
+    assert_eq!(refs[0]["range"], json!({ "start": { "line": 0, "character": 11 }, "end": { "line": 0, "character": 20 } }));
+}
+
+#[test]
+fn open_buffers_win_over_the_disk() {
+    let mut c = Client::start(VAULT);
+    c.open("Sorting.md");
+    let uri = c.uri("Sorting.md");
+    c.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": uri, "version": 2 }, "contentChanges": [{ "text": "[[Other]]\n" }] }),
+    );
+    // Something rewrites the file on disk while it is open.
+    std::fs::write(c.root.join("Sorting.md"), "nothing here\n").unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    let def = c.request("textDocument/definition", c.at("Sorting.md", 0, 3));
+    assert_eq!(def["uri"], c.uri("Other.md"));
+    // Closed, it is what is on disk again.
+    c.notify("textDocument/didClose", json!({ "textDocument": { "uri": uri } }));
+    let refs = c.request(
+        "textDocument/references",
+        json!({ "textDocument": { "uri": c.uri("Other.md") }, "position": { "line": 0, "character": 0 }, "context": { "includeDeclaration": false } }),
+    );
+    assert_eq!(refs, json!([]));
 }

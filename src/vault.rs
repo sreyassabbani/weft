@@ -89,6 +89,12 @@ pub fn heading_key(text: &str) -> String {
     mapped.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
+/// A heading as written in a link: Obsidian leaves out the characters that
+/// would break one.
+pub fn heading_in_link(text: &str) -> String {
+    text.split(|c| "#|^:%[]".contains(c)).flat_map(str::split_whitespace).collect::<Vec<_>>().join(" ")
+}
+
 /// The anchor GitHub generates for a heading, used by Markdown links.
 fn slug(text: &str) -> String {
     text.trim()

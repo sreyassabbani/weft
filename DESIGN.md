@@ -214,7 +214,6 @@ src/
   text.rs       positions and encodings
   target.rs     what the cursor is on
   complete.rs   hover.rs  refs.rs  rename.rs  symbols.rs  diagnose.rs
-  watch.rs      file system events
 ```
 
 Dependencies: `lsp-server` and `lsp-types` (the protocol, without an async

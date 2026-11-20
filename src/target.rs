@@ -27,8 +27,17 @@ pub enum Part {
     Sub,
 }
 
+impl On<'_> {
+    pub fn is_sub(&self) -> bool {
+        matches!(self, On::Link(_, Part::Sub))
+    }
+}
+
 pub fn at(note: &Note, line: u32, byte: u32) -> On<'_> {
-    if let Some(link) = note.links.iter().find(|l| l.span.contains(line, byte)) {
+    // Between two adjacent links, `[[a]][[b]]`, the cursor is on the second.
+    let starts = |l: &&Link| l.span.line == line && l.span.start <= byte && byte < l.span.end;
+    let link = note.links.iter().find(starts).or_else(|| note.links.iter().find(|l| l.span.contains(line, byte)));
+    if let Some(link) = link {
         let sub = !link.subpath.is_empty() && byte > link.path_span.end;
         return On::Link(link, if sub { Part::Sub } else { Part::Path });
     }
@@ -127,9 +136,7 @@ pub fn declaration(vault: &Vault, target: &Target) -> Option<(String, Span)> {
 
 /// How many distinct notes link to `target`.
 pub fn linking_notes(refs: &[Ref]) -> usize {
-    let mut files: Vec<&String> = refs.iter().map(|r| r.file).collect();
-    files.dedup();
-    files.len()
+    refs.iter().map(|r| r.file).collect::<std::collections::BTreeSet<_>>().len()
 }
 
 #[cfg(test)]
@@ -152,6 +159,9 @@ mod tests {
         assert!(matches!(at(note, 0, 17), On::Link(_, Part::Sub)));
         assert!(matches!(at(note, 0, 42), On::Link(_, Part::Sub)));
         assert!(matches!(at(note, 0, 2), On::Body));
+        let adjacent = Vault::from_files(&[("a.md", "[[a]][[b]]")]);
+        let On::Link(l, _) = at(adjacent.note("a.md").unwrap(), 0, 5) else { panic!() };
+        assert_eq!(l.path, "b");
         let t = under(&v, "Sorting.md", 0, 25).unwrap();
         assert_eq!(t, Target::Heading { file: "Array.md".into(), index: 2 });
         assert_eq!(under(&v, "Sorting.md", 0, 10).unwrap(), Target::Note(Dest::File("Array.md".into())));

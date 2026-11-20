@@ -4,7 +4,7 @@ use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position};
 
 use crate::ctx::Ctx;
 use crate::parse::Kind;
-use crate::target::{self, On, Part, Target};
+use crate::target::{self, On, Target};
 use crate::text::split_lines;
 use crate::vault::{self, Dest};
 
@@ -16,10 +16,7 @@ pub fn hover(cx: &Ctx, rel: &str, pos: Position) -> Option<Hover> {
     let note = cx.vault.note(rel)?;
     let (target, link) = match target::at(note, line, byte) {
         On::Link(link, _) if link.kind == Kind::Markdown => return None,
-        On::Link(link, part) => {
-            let part = if link.subpath.is_empty() { part } else { Part::Sub };
-            (target::of_link(cx.vault, rel, link, part), Some(link))
-        }
+        On::Link(link, part) => (target::of_link(cx.vault, rel, link, part), Some(link)),
         On::Heading(index) => (Target::Heading { file: rel.to_string(), index }, None),
         On::Block(index) => (Target::Block { file: rel.to_string(), index }, None),
         On::Body => return None,
@@ -40,7 +37,10 @@ pub fn hover(cx: &Ctx, rel: &str, pos: Position) -> Option<Hover> {
                 if !n.aliases.is_empty() {
                     out += &format!("\n\nAlso: {}", n.aliases.join(", "));
                 }
-                if let Some(link) = link.filter(|l| !l.subpath.is_empty()) {
+                // The cursor is on the note's name, or on a heading or block
+                // that is not there.
+                let missing = link.is_some_and(|l| !l.subpath.is_empty() && target::at(note, line, byte).is_sub());
+                if let Some(link) = link.filter(|_| missing) {
                     let what = if link.block().is_some() { "block" } else { "heading" };
                     let name = &link.subpath.last().unwrap().text;
                     out += &format!("\n\nNo {what} “{name}” in this note.");

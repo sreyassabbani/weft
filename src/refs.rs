@@ -17,8 +17,6 @@ pub fn definition(cx: &Ctx, rel: &str, pos: Position) -> Option<Location> {
     if link.kind == Kind::Markdown {
         return markdown_definition(cx, rel, link);
     }
-    // A link to a heading goes to the heading wherever the cursor is in it.
-    let part = if link.subpath.is_empty() { part } else { target::Part::Sub };
     Some(match target::of_link(cx.vault, rel, link, part) {
         Target::Note(Dest::File(file)) => cx.start_of(&file),
         Target::Note(Dest::Unwritten(_)) => {

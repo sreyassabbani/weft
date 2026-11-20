@@ -114,14 +114,26 @@ pub fn rename(cx: &Ctx, rel: &str, pos: Position, new: &str) -> Result<(Workspac
             edits = move_edits(vault, &[(file.clone(), to.clone())]);
             moved = Some((file.clone(), to));
         }
-        Target::Note(dest @ Dest::Unwritten(_)) => {
+        Target::Note(dest @ Dest::Unwritten(key)) => {
             check_name(new)?;
-            for (from, note) in vault.notes() {
-                for link in note.links.iter().filter(|l| l.kind == Kind::Wiki) {
-                    if &vault.resolve(from, &link.path) == dest {
-                        edits.entry(from.clone()).or_default().push((link.path_span, new.to_string()));
+            // `[[projects/Someday]]` renamed to `Later` stays in `projects`.
+            let new = match key.rsplit_once('/') {
+                Some(_) if new.contains('/') => new.to_string(),
+                Some(_) => {
+                    let written = links_named(vault, dest).next().map(|(_, l)| l.path.clone()).unwrap_or_default();
+                    match written.rsplit_once('/') {
+                        Some((dir, _)) => format!("{dir}/{new}"),
+                        None => new.to_string(),
                     }
                 }
+                None => new.to_string(),
+            };
+            // Naming a note that exists would quietly repoint every link.
+            if let Dest::File(f) = vault.resolve(rel, &new) {
+                return Err(format!("“{}” already exists", vault::link_name(&f)));
+            }
+            for (from, link) in links_named(vault, dest) {
+                edits.entry(from.clone()).or_default().push((link.path_span, new.clone()));
             }
         }
         Target::Heading { file, index } => {
@@ -138,7 +150,7 @@ pub fn rename(cx: &Ctx, rel: &str, pos: Position, new: &str) -> Result<(Workspac
             edits.entry(file.clone()).or_default().push((note.headings[*index].span, new.to_string()));
             // In links, the characters Obsidian strips from heading links
             // are left out.
-            let in_link = new.split(|c| "#|^:%[]".contains(c)).flat_map(str::split_whitespace).collect::<Vec<_>>().join(" ");
+            let in_link = vault::heading_in_link(new);
             for (from, links) in vault.notes() {
                 for link in links.links.iter().filter(|l| l.kind == Kind::Wiki && l.block().is_none()) {
                     if vault.resolve(from, &link.path) != Dest::File(file.clone()) {
@@ -183,6 +195,16 @@ pub fn rename(cx: &Ctx, rel: &str, pos: Position, new: &str) -> Result<(Workspac
         })));
     }
     Ok((edit, moved))
+}
+
+/// Wikilinks resolving to `dest`.
+fn links_named<'a>(vault: &'a Vault, dest: &'a Dest) -> impl Iterator<Item = (&'a String, &'a crate::parse::Link)> {
+    vault.notes().flat_map(move |(from, note)| {
+        note.links
+            .iter()
+            .filter(move |l| l.kind == Kind::Wiki && &vault.resolve(from, &l.path) == dest)
+            .map(move |l| (from, l))
+    })
 }
 
 fn check_name(new: &str) -> Result<(), String> {
@@ -418,6 +440,9 @@ mod tests {
         let v = vault();
         let got = run(&v, "Sorting.md", 1, 4, "Dynamic call (CS)").unwrap();
         assert_eq!(got.len(), 2);
+        assert!(run(&v, "Sorting.md", 1, 4, "Array").unwrap_err().contains("already exists"));
+        let v = Vault::from_files(&[("a.md", "[[projects/Someday]]")]);
+        assert_eq!(run(&v, "a.md", 0, 4, "Later").unwrap(), [("a.md".into(), "projects/Later".into())]);
     }
 
     #[test]
