@@ -8,6 +8,7 @@
 //! left alone.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
 use lsp_types::{
     DocumentChangeOperation, DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier, Position,
@@ -124,21 +125,32 @@ pub fn rename(cx: &Ctx, rel: &str, pos: Position, new: &str) -> Result<(Workspac
             }
         }
         Target::Heading { file, index } => {
-            check_name(new)?;
             let note = vault.note(file).ok_or("No such note")?;
+            let key = vault::heading_key(new);
+            if key.is_empty() {
+                return Err("The new name is empty".into());
+            }
+            // Links compare headings loosely; another heading with the same
+            // key would take this one's links.
+            if note.headings.iter().enumerate().any(|(i, h)| i != *index && vault::heading_key(&h.text) == key) {
+                return Err(format!("“{new}” is already a heading in this note"));
+            }
             edits.entry(file.clone()).or_default().push((note.headings[*index].span, new.to_string()));
-            let section = vault::section(note, *index);
-            let old_key = vault::heading_key(&note.headings[*index].text);
+            // In links, the characters Obsidian strips from heading links
+            // are left out.
+            let in_link = new.split(|c| "#|^:%[]".contains(c)).flat_map(str::split_whitespace).collect::<Vec<_>>().join(" ");
             for (from, links) in vault.notes() {
                 for link in links.links.iter().filter(|l| l.kind == Kind::Wiki && l.block().is_none()) {
                     if vault.resolve(from, &link.path) != Dest::File(file.clone()) {
                         continue;
                     }
-                    if !vault::find_heading(note, link).is_some_and(|i| section.contains(&i)) {
-                        continue;
-                    }
-                    for seg in link.headings().iter().filter(|s| vault::heading_key(&s.text) == old_key) {
-                        edits.entry(from.clone()).or_default().push((seg.span, new.to_string()));
+                    // Each segment names the heading its prefix of the path
+                    // resolves to: `A` in `[[Note#A#B]]` is the `A` above `B`.
+                    let segs = link.headings();
+                    for k in 0..segs.len() {
+                        if vault::find_heading_path(note, &segs[..=k]) == Some(*index) {
+                            edits.entry(from.clone()).or_default().push((segs[k].span, in_link.clone()));
+                        }
                     }
                 }
             }
@@ -206,11 +218,38 @@ fn destination(vault: &Vault, file: &str, new: &str) -> Result<String, String> {
             to = format!("{to}.{ext}");
         }
     }
-    let case_only = to.to_lowercase() == file.to_lowercase();
-    if !case_only && (vault.name_taken(&to, file) || vault.path(&to).exists()) {
+    // Helix's move replaces an existing file and does not create folders,
+    // and edits to links are applied before it moves.
+    let target = vault.path(&to);
+    let taken = vault.files.contains_key(&to) && to != file
+        || vault.name_taken(&to, file) && to.to_lowercase() != file.to_lowercase()
+        || target.exists() && !same_file(&vault.path(file), &target);
+    if taken {
         return Err(format!("“{to}” already exists"));
     }
+    if !parent_exists(vault, &to) {
+        return Err(format!("There is no folder “{}”", to.rsplit_once('/').map_or("", |(d, _)| d)));
+    }
     Ok(to)
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+/// Whether the folder `to` goes into exists, on disk or (in tests) in the
+/// vault.
+fn parent_exists(vault: &Vault, to: &str) -> bool {
+    match to.rsplit_once('/') {
+        None => true,
+        Some((dir, _)) => {
+            vault.path(dir).is_dir() || vault.files.keys().any(|k| k.starts_with(&format!("{dir}/")))
+        }
+    }
 }
 
 /// Edits that keep every wikilink pointing at the same file after `moves`.
@@ -347,6 +386,31 @@ mod tests {
         assert_eq!(got, [("Array.md".into(), "b2".into()), ("Sorting.md".into(), "b2".into())]);
         let got = run(&v, "Sorting.md", 1, 21, "Here").unwrap();
         assert_eq!(got, [("Sorting.md".into(), "Here".into()), ("Sorting.md".into(), "Here".into())]);
+    }
+
+    #[test]
+    fn heading_identity() {
+        let v = Vault::from_files(&[
+            ("N.md", "# A\n## A\n# Existing\n# Why\n"),
+            ("L.md", "[[N#A#A]] [[N#A]] [[N#Why]]"),
+        ]);
+        // The parent `A`: only the first segment of `#A#A`, and `#A`.
+        let got = run(&v, "N.md", 0, 2, "B").unwrap();
+        assert_eq!(got.len(), 3, "{got:?}");
+        // The child `A`: only the second segment.
+        let got = run(&v, "N.md", 1, 3, "C").unwrap();
+        assert_eq!(got, [("L.md".into(), "C".into()), ("N.md".into(), "C".into())]);
+        assert!(run(&v, "N.md", 0, 2, "existing").unwrap_err().contains("already a heading"));
+        // `:` is fine in a heading; links leave it out, as Obsidian does.
+        let got = run(&v, "N.md", 3, 2, "Why: because").unwrap();
+        assert_eq!(got, [("L.md".into(), "Why because".into()), ("N.md".into(), "Why: because".into())]);
+    }
+
+    #[test]
+    fn missing_folders() {
+        let v = vault();
+        assert!(run(&v, "Sorting.md", 0, 3, "nowhere/Arrays").unwrap_err().contains("no folder"));
+        assert!(run(&v, "Sorting.md", 0, 3, "2026/Arrays").is_ok());
     }
 
     #[test]

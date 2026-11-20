@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionList, CompletionTextEdit, InsertReplaceEdit, Position, Range,
 };
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::ctx::Ctx;
@@ -176,7 +176,7 @@ fn rank(
     (insert, replace): (Range, Range),
     closing: &str,
 ) -> Vec<CompletionItem> {
-    let pattern = Pattern::parse(needle, CaseMatching::Ignore, Normalization::Smart);
+    let pattern = Pattern::new(needle, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy);
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
     let mut buf = Vec::new();
     let mut scored: Vec<(u32, Candidate)> = candidates
@@ -291,6 +291,9 @@ mod tests {
         let got = items("[[Combinatorics#hard", 20);
         assert_eq!(got[0].1, "Combinatorics#Hard puzzles]]");
         let got = items("[[Combinatorics#^", 17);
+        assert_eq!(got[0].1, "Combinatorics#^p1]]");
+        // `^` and `!` are text, not query syntax.
+        let got = items("[[Combinatorics#^p", 18);
         assert_eq!(got[0].1, "Combinatorics#^p1]]");
         assert!(items("text [[a]] more", 15).is_empty());
         assert!(items("[[Combi|al", 10).is_empty());

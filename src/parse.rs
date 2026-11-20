@@ -107,7 +107,8 @@ pub fn parse(text: &str) -> Note {
             continue;
         }
 
-        let code = code_spans(line);
+        let mut code = code_spans(line);
+        code.extend(math_spans(line));
         if let Some(h) = heading(n, line) {
             note.headings.push(h);
         }
@@ -245,6 +246,12 @@ fn code_spans(line: &str) -> Vec<(usize, usize)> {
         }
     }
     out
+}
+
+/// `$$…$$` within one line.
+fn math_spans(line: &str) -> Vec<(usize, usize)> {
+    let marks: Vec<usize> = line.match_indices("$$").map(|(i, _)| i).collect();
+    marks.chunks_exact(2).map(|p| (p[0], p[1] + 2)).collect()
 }
 
 fn in_code(code: &[(usize, usize)], i: usize) -> bool {
@@ -470,7 +477,7 @@ mod tests {
 
     #[test]
     fn code_and_math_are_not_links() {
-        let text = "`[[a]]` [[b]]\n```\n[[c]]\n# not a heading\n```\n$$\n[[d]]\n$$\n[[e]]";
+        let text = "`[[a]]` [[b]]\n```\n[[c]]\n# not a heading\n```\n$$\n[[d]]\n$$\n[[e]] $$ [[f]] $$";
         let note = parse(text);
         let paths: Vec<_> = note.links.iter().map(|l| l.path.as_str()).collect();
         assert_eq!(paths, ["b", "e"]);

@@ -5,7 +5,7 @@ use lsp_types::{Location, Position, Range, Url};
 use crate::ctx::Ctx;
 use crate::parse::{self, Kind, Link};
 use crate::target::{self, On, Target};
-use crate::text::Span;
+use crate::text::Lines;
 use crate::vault::{self, Dest};
 
 /// Only links have a definition: the note, heading or block they name, or
@@ -52,21 +52,19 @@ fn markdown_definition(cx: &Ctx, rel: &str, link: &Link) -> Option<Location> {
         return Some(Location::new(uri, start));
     }
     // Headings are only looked up in Markdown files.
-    let text = match cx.vault.rel(&path) {
-        Some(r) if cx.vault.text(&r).is_some() => cx.vault.text(&r)?.to_string(),
-        _ if vault::is_note(&path.to_string_lossy()) => std::fs::read_to_string(&path).ok()?,
-        _ => return Some(Location::new(uri, start)),
+    let found = |note: &parse::Note, text: &str| {
+        let i = vault::find_heading(note, link)?;
+        Some(Lines::new(text).range(note.headings[i].span, cx.enc))
     };
-    let note = parse::parse(&text);
-    let range = match vault::find_heading(&note, link) {
-        Some(i) => heading_range(cx, &text, note.headings[i].span),
-        None => start,
+    let range = match cx.vault.rel(&path).filter(|r| cx.vault.note(r).is_some()) {
+        Some(r) => found(cx.vault.note(&r)?, cx.vault.text(&r)?),
+        None if vault::is_note(&path.to_string_lossy()) => {
+            let text = std::fs::read_to_string(&path).ok()?;
+            found(&parse::parse(&text), &text)
+        }
+        None => None,
     };
-    Some(Location::new(uri, range))
-}
-
-fn heading_range(cx: &Ctx, text: &str, span: Span) -> Range {
-    crate::text::Lines::new(text).range(span, cx.enc)
+    Some(Location::new(uri, range.unwrap_or(start)))
 }
 
 pub fn references(cx: &Ctx, rel: &str, pos: Position, declaration: bool) -> Vec<Location> {

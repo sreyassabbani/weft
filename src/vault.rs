@@ -36,6 +36,8 @@ pub struct File {
 
 pub struct Vault {
     pub root: PathBuf,
+    /// `root` with symlinks resolved: file events arrive with real paths.
+    real_root: PathBuf,
     pub kind: Root,
     /// Paths from the root, with `/` separators and extensions.
     pub files: BTreeMap<String, File>,
@@ -119,6 +121,7 @@ impl Vault {
     /// Loads the vault at `root`. For `Root::Single`, `only` is the one file.
     pub fn load(root: PathBuf, kind: Root, only: Option<&str>) -> Vault {
         let mut vault = Vault {
+            real_root: root.canonicalize().unwrap_or_else(|_| root.clone()),
             root,
             kind,
             files: BTreeMap::new(),
@@ -141,6 +144,7 @@ impl Vault {
     pub fn from_files(files: &[(&str, &str)]) -> Vault {
         let mut vault = Vault {
             root: PathBuf::from("/vault"),
+            real_root: PathBuf::from("/vault"),
             kind: Root::Obsidian,
             files: BTreeMap::new(),
             index: Index::default(),
@@ -183,8 +187,12 @@ impl Vault {
     fn read(&self, rel: &str) -> File {
         let path = self.path(rel);
         let stamp = std::fs::metadata(&path).ok().map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()));
+        // Helix drops a byte order mark when it loads a file; so do we, or
+        // ranges on the first line would be off.
         let text = is_note(rel).then(|| {
-            std::fs::read(&path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+            String::from_utf8_lossy(bytes).into_owned()
         });
         File {
             note: text.as_deref().map(parse::parse).unwrap_or_default(),
@@ -204,7 +212,7 @@ impl Vault {
 
     /// The path from the root, if `path` is inside the vault.
     pub fn rel(&self, path: &Path) -> Option<String> {
-        let rel = path.strip_prefix(&self.root).ok()?;
+        let rel = path.strip_prefix(&self.root).or_else(|_| path.strip_prefix(&self.real_root)).ok()?;
         let parts: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect();
         (!parts.is_empty()).then(|| parts.join("/"))
     }
@@ -283,6 +291,7 @@ impl Vault {
         let on_disk = self.walk();
         let listed: std::collections::HashSet<&String> = on_disk.iter().collect();
         let mut changed = false;
+        let mut membership = false;
         let gone: Vec<String> = self
             .files
             .iter()
@@ -292,8 +301,8 @@ impl Vault {
         for rel in gone {
             self.files.remove(&rel);
             changed = true;
+            membership = true;
         }
-        let mut added = false;
         drop(listed);
         for rel in on_disk {
             let stamp = std::fs::metadata(self.path(&rel))
@@ -302,14 +311,14 @@ impl Vault {
             match self.files.get(&rel) {
                 Some(f) if f.open.is_some() || f.stamp == stamp => {}
                 existing => {
-                    added |= existing.is_none();
+                    membership |= existing.is_none();
                     let file = self.read(&rel);
                     self.files.insert(rel, file);
                     changed = true;
                 }
             }
         }
-        if changed || added {
+        if membership {
             self.reindex();
         }
         changed
@@ -372,6 +381,10 @@ impl Index {
                 return Dest::File(rel.clone());
             }
         }
+        // `./` and `../` name one path and nothing else.
+        if is_relative(link) {
+            return Dest::Unwritten(lower.strip_suffix(".md").unwrap_or(&lower).to_string());
+        }
         let here = dir(from).to_lowercase();
         if !here.is_empty() {
             for candidate in [format!("{here}/{lower}"), format!("{here}/{with_md}")] {
@@ -405,7 +418,10 @@ impl Index {
     /// shares it, else the full path from the root (Obsidian's default).
     pub fn link_text(&self, rel: &str) -> String {
         let name = link_name(rel);
-        if self.names.get(&name.to_lowercase()).is_some_and(|v| v.len() == 1) {
+        // Unique, and not shadowed by a path from the root (`Spec.md` names
+        // `Spec.md` before `Docs/Spec.md.md`).
+        let unique = self.names.get(&name.to_lowercase()).is_some_and(|v| v.len() == 1);
+        if unique && self.resolve("", name) == Dest::File(rel.to_string()) {
             name.to_string()
         } else if is_note(rel) {
             rel[..rel.len() - 3].to_string()
@@ -423,9 +439,14 @@ fn rank<'a>(rel: &'a str, here: &str) -> (bool, usize, &'a str) {
 
 /// Joins `./` and `../` links to the linking note's folder; other links are
 /// from the root.
+fn is_relative(link: &str) -> bool {
+    let link = link.trim();
+    link.starts_with("./") || link.starts_with("../")
+}
+
 fn normalize(here: &str, link: &str) -> String {
+    let relative = is_relative(link);
     let link = link.trim().trim_start_matches('/');
-    let relative = link.starts_with("./") || link.starts_with("../");
     let mut parts: Vec<&str> = if relative && !here.is_empty() { here.split('/').collect() } else { Vec::new() };
     for part in link.split('/') {
         match part {
@@ -527,6 +548,7 @@ mod tests {
         assert_eq!(v.resolve("x.md", "1.41 sketches"), Dest::Unwritten("1.41 sketches".into()));
         assert_eq!(v.resolve("x.md", "2027/01/04"), Dest::Unwritten("2027/01/04".into()));
         assert_eq!(v.resolve("School/Index.md", "./Notes/Array"), file("School/Notes/Array.md"));
+        assert_eq!(v.resolve("School/Index.md", "./Array"), Dest::Unwritten("school/array".into()));
         assert_eq!(v.resolve("x.md", ""), file("x.md"));
     }
 
@@ -539,6 +561,9 @@ mod tests {
         assert_eq!(v.link_text("School/Index.md"), "Index");
         assert_eq!(v.link_text("16.md"), "16");
         assert_eq!(v.link_text("attachments/Screenshot 1.png"), "Screenshot 1.png");
+        let v = Vault::from_files(&[("Spec.md", ""), ("Docs/Spec.md.md", "")]);
+        assert_eq!(v.link_text("Docs/Spec.md.md"), "Docs/Spec.md");
+        assert_eq!(v.resolve("x.md", "Docs/Spec.md"), file("Docs/Spec.md.md"));
     }
 
     #[test]

@@ -332,6 +332,9 @@ impl Server {
             }
             Rename::METHOD => {
                 let p = params!(RenameParams);
+                // Edits to closed notes must match the disk now, not as of
+                // the last file event.
+                self.refresh(&p.text_document_position.text_document.uri);
                 let pos = p.text_document_position.position;
                 let (cx, rel) = at!(p.text_document_position);
                 let (edit, moved) =
@@ -369,10 +372,21 @@ impl Server {
                 }
                 let Some((old, _)) = files.first() else { return null };
                 let Some(i) = self.vault_of(old) else { return null };
+                self.vaults[i].rescan();
                 let cx = Ctx { vault: &self.vaults[i], enc: self.enc };
                 json(serde_json::to_value(rename::will_rename(&cx, &files)))
             }
             _ => Err((ErrorCode::MethodNotFound, format!("weft does not handle {}", req.method))),
+        }
+    }
+
+    /// Rescans the vault of a document now, without waiting for its file
+    /// events to settle.
+    fn refresh(&mut self, uri: &Url) {
+        if let Some((i, _)) = self.locate(uri) {
+            if self.vaults[i].rescan() {
+                self.publish_all(i);
+            }
         }
     }
 

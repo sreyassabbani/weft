@@ -238,3 +238,24 @@ fn rename_and_echo() {
     let err = c.request("textDocument/rename", params);
     assert!(err["error"].as_str().unwrap().contains("already exists"));
 }
+
+#[test]
+fn rename_sees_the_disk_as_it_is_now() {
+    let mut c = Client::start(VAULT);
+    c.open("Sorting.md");
+    // A pull rewrites a closed note that links to `Array`, and a rename
+    // comes before the file events settle.
+    std::fs::write(c.root.join("Pulled.md"), "new first line\n\u{feff}x\n[[Array]]\n").unwrap();
+    std::fs::write(c.root.join("Bom.md"), "\u{feff}[[Array]] é\n").unwrap();
+    let mut params = c.at("Sorting.md", 0, 56);
+    params["newName"] = json!("Arrays");
+    let edit = c.request("textDocument/rename", params);
+    let ops = edit["documentChanges"].as_array().unwrap();
+    let range_in = |name: &str| {
+        let uri = c.uri(name);
+        ops.iter().find(|o| o["textDocument"]["uri"] == uri.as_str()).map(|o| o["edits"][0]["range"].clone())
+    };
+    assert_eq!(range_in("Pulled.md").unwrap()["start"], json!({ "line": 2, "character": 2 }));
+    // Helix drops the byte order mark when it loads the file.
+    assert_eq!(range_in("Bom.md").unwrap(), json!({ "start": { "line": 0, "character": 2 }, "end": { "line": 0, "character": 7 } }));
+}

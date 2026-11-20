@@ -1,7 +1,7 @@
 //! Document symbols (the outline) and workspace symbols (notes and headings).
 
 use lsp_types::{DocumentSymbol, Location, SymbolInformation, SymbolKind};
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::ctx::Ctx;
@@ -67,7 +67,7 @@ fn nest(flat: Vec<(u8, DocumentSymbol)>) -> Vec<DocumentSymbol> {
 /// Notes and headings matching `query`, best first. Flat, as Helix wants.
 #[allow(deprecated)]
 pub fn workspace(cx: &Ctx, query: &str) -> Vec<SymbolInformation> {
-    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+    let pattern = Pattern::new(query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy);
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
     let mut buf = Vec::new();
     let mut scored: Vec<(u32, SymbolInformation)> = Vec::new();
