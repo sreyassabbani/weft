@@ -1,5 +1,6 @@
 //! `[[` completion: notes, aliases, notes not written yet, attachments in
-//! embeds, and headings or blocks after `#`.
+//! embeds, and headings or blocks after `#`. Also `@` for daily notes, which
+//! inserts a plain link (see `dates`).
 //!
 //! Helix filters the menu by the word before the cursor and closes it on any
 //! other character. Titles are sentences, so the server does the filtering on
@@ -14,7 +15,10 @@ use lsp_types::{
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
+use jiff::civil::Date;
+
 use crate::ctx::Ctx;
+use crate::dates::{self, Layout};
 use crate::parse::Segment;
 use crate::text::{Span, split_lines};
 use crate::vault::{self, Dest};
@@ -40,10 +44,18 @@ struct Candidate {
 }
 
 pub fn complete(cx: &Ctx, rel: &str, pos: Position) -> Option<CompletionList> {
+    complete_on(cx, rel, pos, dates::today())
+}
+
+/// `complete`, with today's date given.
+pub fn complete_on(cx: &Ctx, rel: &str, pos: Position, today: Date) -> Option<CompletionList> {
     let text = cx.vault.text(rel)?;
     let (line_no, byte) = cx.byte_of(rel, pos);
     let line = *split_lines(text).get(line_no as usize)?;
     let byte = byte as usize;
+    if let Some(list) = day_links(cx, rel, line_no as usize, line, byte, today) {
+        return Some(list);
+    }
     let before = &line[..byte];
     let open = before.rfind("[[")?;
     let query = &before[open + 2..];
@@ -96,6 +108,65 @@ pub fn complete(cx: &Ctx, rel: &str, pos: Position) -> Option<CompletionList> {
             }
         }
     }
+    Some(CompletionList { is_incomplete: true, items })
+}
+
+/// Characters of a date being typed after `@`.
+fn in_day(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '-')
+}
+
+/// `@` followed by a day (`@today`, `@fri`, `@11.15`, `@2026.11.15`): items
+/// that replace it with a plain link to that day's note. `@` counts only at
+/// the start of a word, so email addresses are left alone.
+fn day_links(cx: &Ctx, rel: &str, line_no: usize, line: &str, byte: usize, today: Date) -> Option<CompletionList> {
+    let before = &line[..byte];
+    let start = before.char_indices().rev().find(|&(_, c)| !in_day(c)).map_or(0, |(i, c)| i + c.len_utf8());
+    let at = before[..start].strip_suffix('@')?.len();
+    if !line[..at].chars().next_back().is_none_or(|c| c.is_whitespace() || matches!(c, '(' | '[' | '"')) {
+        return None;
+    }
+    let end = byte + line[byte..].find(|c: char| !in_day(c)).unwrap_or(line.len() - byte);
+    let query = &line[start..byte];
+    let days = dates::days(query, today);
+    if days.is_empty() {
+        return None;
+    }
+    let vault = cx.vault;
+    let layout = Layout::detect(vault.files.keys());
+    let insert = cx.range(rel, Span::new(line_no, at, byte));
+    let replace = cx.range(rel, Span::new(line_no, at, end));
+    let items = days
+        .into_iter()
+        .enumerate()
+        .map(|(i, (date, word))| {
+            let path = layout.path(date);
+            let exists = vault.files.contains_key(&path);
+            // Always the full path: a bare `[[14]]` says little, and would
+            // change meaning once another month has a 14th.
+            let link = &path[..path.len() - 3];
+            let label = date.strftime("%Y.%m.%d %a").to_string();
+            let detail = match (word, exists) {
+                (Some(w), true) => w.to_string(),
+                (Some(w), false) => format!("{w}, not written yet"),
+                (None, true) => String::new(),
+                (None, false) => "not written yet".into(),
+            };
+            CompletionItem {
+                filter_text: Some(format!("{query} {label}")),
+                sort_text: Some(format!("{i:04}")),
+                text_edit: Some(CompletionTextEdit::InsertAndReplace(InsertReplaceEdit {
+                    new_text: format!("[[{link}]]"),
+                    insert,
+                    replace,
+                })),
+                label,
+                detail: (!detail.is_empty()).then_some(detail),
+                kind: Some(CompletionItemKind::FILE),
+                ..Default::default()
+            }
+        })
+        .collect();
     Some(CompletionList { is_incomplete: true, items })
 }
 
@@ -338,6 +409,34 @@ mod tests {
         assert!(items("[[Combinatorics#Hard puzzles]]", 28).is_empty());
         assert!(items("text [[a]] more", 15).is_empty());
         assert!(items("[[Combi|al", 10).is_empty());
+    }
+
+    #[test]
+    fn day_links() {
+        let today = jiff::civil::date(2026, 11, 15);
+        let at = |text: &str, col: usize| {
+            let v = vault(text);
+            let cx = Ctx { vault: &v, enc: Encoding::Utf8 };
+            let list = complete_on(&cx, "x.md", Position::new(0, col as u32), today).map(|l| l.items).unwrap_or_default();
+            list.into_iter()
+                .map(|i| match i.text_edit {
+                    Some(CompletionTextEdit::InsertAndReplace(e)) => (i.label, e.new_text, e.insert, e.replace),
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let got = at("on @11.14", 9);
+        assert_eq!((got[0].0.as_str(), got[0].1.as_str()), ("2026.11.14 Sat", "[[2026/11/14]]"));
+        assert_eq!(got[0].2, Range::new(Position::new(0, 3), Position::new(0, 9)));
+        // A day with no note yet links where it would be written.
+        assert_eq!(at("@tod", 4)[0].1, "[[2026/11/15]]");
+        assert_eq!(at("(@2026.10.14)", 12)[0].1, "[[2026/10/14]]");
+        // Replace mode takes the rest of the date after the cursor.
+        assert_eq!(at("@11.14 next", 3)[0].3.end, Position::new(0, 6));
+        assert_eq!(at("@", 1).len(), 3);
+        assert!(at("me@gmail.com", 12).is_empty());
+        assert!(at("me@11", 5).is_empty());
+        assert!(at("@someone", 8).is_empty());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 pub mod changes;
 pub mod complete;
 pub mod ctx;
+pub mod dates;
 pub mod diagnose;
 pub mod hover;
 pub mod parse;

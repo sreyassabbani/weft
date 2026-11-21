@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 crossbeam-channel = "0.5"
 ignore = "0.4"
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 lsp-server = "0.7"
 lsp-types = "0.95"
 notify = "8"

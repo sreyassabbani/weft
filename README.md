@@ -6,6 +6,8 @@ way Obsidian notes do. Written for Helix.
 - `[[` completion that keeps working through spaces and punctuation in
   titles, with headings after `#`, block ids after `#^`, frontmatter
   aliases, and notes not written yet
+- `@` for daily notes: `@today`, `@fri`, `@11.15` or `@2026.11.15` completes
+  to a plain `[[2026/11/15]]`, in whatever layout the vault's daily notes use
 - go to definition on links, notes, headings and blocks; on a note not
   written yet it opens a new buffer where Obsidian would create it
 - references, hover, document and workspace symbols
