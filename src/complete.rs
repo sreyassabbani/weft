@@ -1,11 +1,13 @@
-//! `[[` completion: notes, aliases, notes not written yet, attachments in
-//! embeds, and headings or blocks after `#`. Also `@` for daily notes, which
-//! inserts a plain link (see `dates`).
+//! `[[` completion (and `[` in weft's syntax): notes, aliases, notes not
+//! written yet, attachments in embeds, and headings or blocks after `#`.
+//! Also `@` for daily notes (see `dates`), which inserts `@2026.11.22` in
+//! weft's syntax and a plain link otherwise.
 //!
 //! Helix filters the menu by the word before the cursor and closes it on any
 //! other character. Titles are sentences, so the server does the filtering on
-//! the whole text after `[[`, answers incomplete lists so Helix asks again on
-//! every keystroke, and asks to be triggered on spaces and punctuation.
+//! the whole text after the brackets, answers incomplete lists so Helix asks
+//! again on every keystroke, and asks to be triggered on spaces and
+//! punctuation.
 
 use std::collections::BTreeMap;
 
@@ -19,7 +21,7 @@ use jiff::civil::Date;
 
 use crate::ctx::Ctx;
 use crate::dates::{self, Layout};
-use crate::parse::Segment;
+use crate::parse::{self, Segment, Syntax};
 use crate::text::{Span, split_lines};
 use crate::vault::{self, Dest};
 
@@ -57,23 +59,25 @@ pub fn complete_on(cx: &Ctx, rel: &str, pos: Position, today: Date) -> Option<Co
         return Some(list);
     }
     let before = &line[..byte];
-    let open = before.rfind("[[")?;
-    let query = &before[open + 2..];
-    if query.contains("]]") || query.contains('|') {
+    let weft = matches!(cx.vault.syntax, Syntax::Weft(_));
+    let (open, width) = opener(before, weft)?;
+    let (opening, closer) = (&"[["[..width], &"]]"[..width]);
+    let query = &before[open + width..];
+    if query.contains(closer) || query.contains('|') || width == 1 && !single_link(&line[..open], query) {
         return None;
     }
     let embed = open > 0 && line.as_bytes()[open - 1] == b'!';
 
     // Helix moves the cursor to the start of an edit that reaches past it, so
     // the edit inserts up to the cursor. In replace mode it also replaces the
-    // rest of the name, up to an alias or heading part or the closing `]]`.
-    // Closing brackets are added only when missing: Helix auto-pairs them.
+    // rest of the name, up to an alias or heading part or the closing
+    // brackets. Those are added only when missing: Helix auto-pairs them.
     let after = &line[byte..];
-    let close = after.find("]]").filter(|&c| !after[..c].contains("[["));
+    let close = after.find(closer).filter(|&c| !after[..c].contains(opening));
     let stop: &[char] = if query.contains('#') { &['|'] } else { &['|', '#'] };
     let (end, closing) = match close {
         Some(c) => (byte + after[..c].find(stop).unwrap_or(c), ""),
-        None => (byte, "]]"),
+        None => (byte, closer),
     };
     let line_no = line_no as usize;
 
@@ -84,7 +88,7 @@ pub fn complete_on(cx: &Ctx, rel: &str, pos: Position, today: Date) -> Option<Co
             let last = query.rfind('#').unwrap() + 1;
             (open + 2 + last, &query[last..], sub_candidates(cx, rel, &query[..h], &query[h + 1..])?)
         }
-        None => (open + 2, query, note_candidates(cx, embed, rel, line_no as u32, open as u32)),
+        None => (open + width, query, note_candidates(cx, embed, rel, line_no as u32, open as u32)),
     };
     // What is already after the cursor, such as the closing quote Helix
     // auto-paired in `[["quoted|"]]`.
@@ -111,6 +115,27 @@ pub fn complete_on(cx: &Ctx, rel: &str, pos: Position, today: Date) -> Option<Co
     Some(CompletionList { is_incomplete: true, items })
 }
 
+/// Where the link being typed opens, and with how many brackets: `[[`, or
+/// in weft's syntax also `[`.
+fn opener(before: &str, weft: bool) -> Option<(usize, usize)> {
+    if !weft {
+        return before.rfind("[[").map(|i| (i, 2));
+    }
+    let i = before.rfind('[')?;
+    Some(if i > 0 && before.as_bytes()[i - 1] == b'[' { (i - 1, 2) } else { (i, 1) })
+}
+
+/// Whether `[` followed by `query` may be a link being typed, and not a
+/// checkbox, a footnote, an escaped bracket or a Markdown reference.
+fn single_link(before: &str, query: &str) -> bool {
+    let item = before.trim_start().strip_suffix(' ').is_some_and(|m| {
+        matches!(m, "-" | "*" | "+")
+            || m.strip_suffix(['.', ')']).is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+    });
+    let checkbox = item && matches!(query.trim(), "" | "x" | "X");
+    !(checkbox || query.starts_with('^') || before.ends_with(['\\', ']']))
+}
+
 /// Characters of a date being typed after `@`.
 fn in_day(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '-')
@@ -128,6 +153,11 @@ fn day_links(cx: &Ctx, rel: &str, line_no: usize, line: &str, byte: usize, today
     }
     let end = byte + line[byte..].find(|c: char| !in_day(c)).unwrap_or(line.len() - byte);
     let query = &line[start..byte];
+    let weft = matches!(cx.vault.syntax, Syntax::Weft(_));
+    // Already a day as weft writes one.
+    if weft && parse::day(query).is_some() {
+        return None;
+    }
     let days = dates::days(query, today);
     if days.is_empty() {
         return None;
@@ -144,7 +174,11 @@ fn day_links(cx: &Ctx, rel: &str, line_no: usize, line: &str, byte: usize, today
             let exists = vault.files.contains_key(&path);
             // Always the full path: a bare `[[14]]` says little, and would
             // change meaning once another month has a 14th.
-            let link = &path[..path.len() - 3];
+            let link = if weft {
+                format!("@{}", date.strftime("%Y.%m.%d"))
+            } else {
+                format!("[[{}]]", &path[..path.len() - 3])
+            };
             let label = date.strftime("%Y.%m.%d %a").to_string();
             let detail = match (word, exists) {
                 (Some(w), true) => w.to_string(),
@@ -156,7 +190,7 @@ fn day_links(cx: &Ctx, rel: &str, line_no: usize, line: &str, byte: usize, today
                 filter_text: Some(format!("{query} {label}")),
                 sort_text: Some(format!("{i:04}")),
                 text_edit: Some(CompletionTextEdit::InsertAndReplace(InsertReplaceEdit {
-                    new_text: format!("[[{link}]]"),
+                    new_text: link,
                     insert,
                     replace,
                 })),
@@ -437,6 +471,41 @@ mod tests {
         assert!(at("me@gmail.com", 12).is_empty());
         assert!(at("me@11", 5).is_empty());
         assert!(at("@someone", 8).is_empty());
+    }
+
+    #[test]
+    fn weft_syntax() {
+        let today = jiff::civil::date(2026, 11, 15);
+        let at = |text: &str, col: usize| {
+            let v = Vault::weft_from_files(&[
+                ("Combinatorics.md", ""),
+                ("Can combinatorics be explained entirely physically?.md", ""),
+                ("2026/11/14.md", ""),
+                ("x.md", text),
+            ]);
+            let cx = Ctx { vault: &v, enc: Encoding::Utf8 };
+            let list = complete_on(&cx, "x.md", Position::new(0, col as u32), today).map(|l| l.items);
+            list.unwrap_or_default()
+                .into_iter()
+                .map(|i| match i.text_edit {
+                    Some(CompletionTextEdit::InsertAndReplace(e)) => e.new_text,
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(at("see [combi phys", 15)[0], "Can combinatorics be explained entirely physically?]");
+        // Auto-paired: `[]` with the cursor inside.
+        assert_eq!(at("[Combi]", 6)[0], "Combinatorics");
+        assert_eq!(at("[[Combi", 7)[0], "Combinatorics]]");
+        assert!(at("[Combinatorics]", 14).is_empty());
+        assert!(!at("- [Comb", 7).is_empty());
+        // Checkboxes and footnotes.
+        for (text, col) in [("- [", 3), ("- [ ", 4), ("1. [x", 5), ("text[^1", 7), ("\\[Comb", 6), ("[a][Comb", 8)] {
+            assert!(at(text, col).is_empty(), "{text}");
+        }
+        assert_eq!(at("on @11.14", 9)[0], "@2026.11.14");
+        assert_eq!(at("@tod", 4)[0], "@2026.11.15");
+        assert!(at("@2026.11.14", 11).is_empty());
     }
 
     #[test]

@@ -1,7 +1,22 @@
 //! A single pass over the lines of a note: frontmatter aliases, headings,
 //! block ids and links.
 
+use jiff::civil::Date;
+
+use crate::dates::Layout;
 use crate::text::{Span, split_lines};
+
+/// The link forms a vault's notes are written in.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum Syntax {
+    /// Obsidian's: `[[note]]`, and `[text](path)`.
+    #[default]
+    Obsidian,
+    /// weft's, in a vault marked by a `.weft` file: Obsidian's, plus `[note]`
+    /// and `@2026.11.22` for a day's note, which lives where the vault's
+    /// daily notes do.
+    Weft(Layout),
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct Note {
@@ -19,6 +34,8 @@ pub enum Kind {
     Wiki,
     /// `[text](path#heading)`, kept for go-to-definition only.
     Markdown,
+    /// `@2026.11.22`: the day's note, by its path.
+    Day,
 }
 
 #[derive(Debug, Clone)]
@@ -67,7 +84,12 @@ pub struct Block {
     pub span: Span,
 }
 
+/// A note in Obsidian's syntax.
 pub fn parse(text: &str) -> Note {
+    parse_with(text, &Syntax::Obsidian)
+}
+
+pub fn parse_with(text: &str, syntax: &Syntax) -> Note {
     let lines = split_lines(text);
     let mut note = Note::default();
     let mut i = 0;
@@ -115,8 +137,15 @@ pub fn parse(text: &str) -> Note {
         if let Some(b) = block(n, line) {
             note.blocks.push(b);
         }
+        let first = note.links.len();
         wikilinks(n, line, &code, &mut note.links);
         markdown_links(n, line, &code, &mut note.links);
+        if let Syntax::Weft(layout) = syntax {
+            let taken: Vec<(usize, usize)> =
+                note.links[first..].iter().map(|l| (l.span.start as usize, l.span.end as usize)).collect();
+            brackets(n, line, &code, &taken, &mut note.links);
+            days(n, line, &code, layout, &mut note.links);
+        }
     }
     note.links.sort_by_key(|l| (l.span.line, l.span.start));
     note
@@ -275,11 +304,106 @@ fn wikilinks(n: usize, line: &str, code: &[(usize, usize)], out: &mut Vec<Link>)
         }
         let embed = open > 0 && line.as_bytes()[open - 1] == b'!';
         let start = if embed { open - 1 } else { open };
-        out.push(wikilink(n, line, start, inner, close, embed));
+        out.push(wikilink(n, line, start, inner, close, close + 2, embed));
     }
 }
 
-fn wikilink(n: usize, line: &str, start: usize, inner: usize, close: usize, embed: bool) -> Link {
+/// `[note]`, in weft's syntax: a wikilink with single brackets. Left alone:
+/// checkboxes (`[ ]`, `[x]`), footnotes (`[^1]`), Markdown's own links and
+/// reference definitions, escaped brackets, and text with no letter or
+/// digit in it, such as `[...]`.
+fn brackets(n: usize, line: &str, code: &[(usize, usize)], taken: &[(usize, usize)], out: &mut Vec<Link>) {
+    let bytes = line.as_bytes();
+    let mut from = 0;
+    while let Some(found) = line[from..].find('[') {
+        let open = from + found;
+        from = open + 1;
+        let Some(close) = line[open + 1..].find(['[', ']']).map(|i| open + 1 + i) else { return };
+        if bytes[close] == b'[' {
+            continue;
+        }
+        let before = open.checked_sub(1).map(|i| bytes[i]);
+        let after = bytes.get(close + 1).copied();
+        let content = &line[open + 1..close];
+        let skip = in_code(code, open)
+            || taken.iter().any(|&(a, b)| a <= open && open < b)
+            || matches!(before, Some(b'\\' | b'[' | b']'))
+            || matches!(after, Some(b'(' | b'['))
+            || after == Some(b':') && line[..open].trim().is_empty()
+            || matches!(content, "x" | "X")
+            || content.starts_with('^')
+            || !content.chars().any(char::is_alphanumeric);
+        if skip {
+            continue;
+        }
+        let embed = before == Some(b'!');
+        out.push(wikilink(n, line, if embed { open - 1 } else { open }, open + 1, close, close + 1, embed));
+        from = close + 1;
+    }
+}
+
+/// `@2026.11.22` at the start of a word, in weft's syntax.
+fn days(n: usize, line: &str, code: &[(usize, usize)], layout: &Layout, out: &mut Vec<Link>) {
+    for (at, _) in line.match_indices('@') {
+        if !line[..at].chars().next_back().is_none_or(|c| c.is_whitespace() || matches!(c, '(' | '[' | '"')) {
+            continue;
+        }
+        let Some(date) = line.get(at + 1..at + 11).and_then(day) else { continue };
+        // Not part of something longer: `@2026.11.22.` ends a sentence, but
+        // `@2026.11.223` is not a day.
+        let rest = &line[at + 11..];
+        let mut next = rest.chars();
+        let longer = match next.next() {
+            Some(c) if c.is_alphanumeric() || c == '_' => true,
+            Some('.' | '/' | '-') => next.next().is_some_and(|c| c.is_ascii_digit()),
+            _ => false,
+        };
+        if longer || in_code(code, at) {
+            continue;
+        }
+        let path = layout.path(date);
+        out.push(Link {
+            kind: Kind::Day,
+            embed: false,
+            span: Span::new(n, at, at + 11),
+            path: path[..path.len() - 3].to_string(),
+            path_span: Span::new(n, at + 1, at + 11),
+            subpath: Vec::new(),
+        });
+    }
+}
+
+/// `2026.11.22`, exactly.
+pub fn day(s: &str) -> Option<Date> {
+    let b = s.as_bytes();
+    let shape = b.len() == 10
+        && b.iter().enumerate().all(|(i, &c)| if i == 4 || i == 7 { c == b'.' } else { c.is_ascii_digit() });
+    if !shape {
+        return None;
+    }
+    Date::new(s[..4].parse().ok()?, s[5..7].parse().ok()?, s[8..].parse().ok()?).ok()
+}
+
+/// How `syntax` writes a link to `rel` whose text is `text`: a day's note as
+/// `@2026.11.22` and others in single brackets in weft's syntax, where that
+/// cannot be misread; otherwise in double brackets.
+pub fn write_link(syntax: &Syntax, text: &str, rel: &str) -> String {
+    if let Syntax::Weft(layout) = syntax {
+        if let Some(date) = layout.date(rel) {
+            return format!("@{}", date.strftime("%Y.%m.%d"));
+        }
+        let plain = !matches!(text, "x" | "X")
+            && !text.starts_with('^')
+            && !text.contains(['[', ']'])
+            && text.chars().any(char::is_alphanumeric);
+        if plain {
+            return format!("[{text}]");
+        }
+    }
+    format!("[[{text}]]")
+}
+
+fn wikilink(n: usize, line: &str, start: usize, inner: usize, close: usize, end: usize, embed: bool) -> Link {
     let content = &line[inner..close];
     // The alias starts at the first `|`; in tables it is written `\|`.
     let target_end = match content.find('|') {
@@ -310,7 +434,7 @@ fn wikilink(n: usize, line: &str, start: usize, inner: usize, close: usize, embe
     Link {
         kind: Kind::Wiki,
         embed,
-        span: Span::new(n, start, close + 2),
+        span: Span::new(n, start, end),
         path,
         path_span,
         subpath,
@@ -511,6 +635,47 @@ mod tests {
         assert_eq!(parse("---\naliases: [A, 'B']\n---\n").aliases, ["A", "B"]);
         // Links in frontmatter are properties, not links.
         assert!(parse("---\nup: \"[[x]]\"\n---\n").links.is_empty());
+    }
+
+    #[test]
+    fn weft_syntax() {
+        let weft = Syntax::Weft(Layout::Nested(String::new()));
+        let text = "see [Plan] and [Array#C++|vectors], ![a.png] [[Both]]\n\
+                    - [ ] task\n\
+                    - [x] done[^1] [...] \\[no] [md](x.md) [ref][r] `[code]`\n\
+                    [label]: https://x.org\n\
+                    on @2026.11.22. (@2026.02.03) me@2026.11.22 @2026.11.223 @2026.02.30 `@2026.11.22`";
+        let note = parse_with(text, &weft);
+        let got: Vec<_> = note.links.iter().map(|l| (l.kind, l.path.as_str(), l.embed)).collect();
+        assert_eq!(
+            got,
+            [
+                (Kind::Wiki, "Plan", false),
+                (Kind::Wiki, "Array", false),
+                (Kind::Wiki, "a.png", true),
+                (Kind::Wiki, "Both", false),
+                (Kind::Markdown, "x.md", false),
+                (Kind::Day, "2026/11/22", false),
+                (Kind::Day, "2026/02/03", false),
+            ]
+        );
+        let plan = &note.links[0];
+        assert_eq!((plan.span.start, plan.span.end, plan.path_span.start, plan.path_span.end), (4, 10, 5, 9));
+        assert_eq!(note.links[1].subpath[0].text, "C++");
+        let day = &note.links[5];
+        assert_eq!((day.span.start, day.span.end, day.path_span.start), (3, 14, 4));
+        // Obsidian's syntax has neither.
+        assert!(parse("[Plan] @2026.11.22").links.is_empty());
+    }
+
+    #[test]
+    fn writing_links() {
+        let weft = Syntax::Weft(Layout::Nested(String::new()));
+        assert_eq!(write_link(&weft, "2026/11/22", "2026/11/22.md"), "@2026.11.22");
+        assert_eq!(write_link(&weft, "Plan", "Plan.md"), "[Plan]");
+        assert_eq!(write_link(&weft, "x", "x.md"), "[[x]]");
+        assert_eq!(write_link(&weft, "...", "....md"), "[[...]]");
+        assert_eq!(write_link(&Syntax::Obsidian, "2026/11/22", "2026/11/22.md"), "[[2026/11/22]]");
     }
 
     #[test]

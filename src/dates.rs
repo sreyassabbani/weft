@@ -62,6 +62,14 @@ impl Layout {
             Layout::Flat(f) => join(f, date.strftime("%Y-%m-%d.md").to_string()),
         }
     }
+
+    /// The day `rel` is the note for, if it is one.
+    pub fn date(&self, rel: &str) -> Option<Date> {
+        let stem = rel.strip_suffix(".md")?;
+        let tail = stem.get(stem.len().checked_sub(10)?..)?;
+        let date = crate::parse::day(&tail.replace(['/', '-'], "."))?;
+        (self.path(date) == rel).then_some(date)
+    }
 }
 
 const WORDS: [(&str, i8); 3] = [("today", 0), ("yesterday", -1), ("tomorrow", 1)];
@@ -133,6 +141,10 @@ mod tests {
         assert_eq!(Layout::of("Journal/2026/11/14.md"), Some(Layout::Nested("Journal".into())));
         assert_eq!(Layout::of("Daily/2026-11-14.md"), Some(Layout::Flat("Daily".into())));
         assert_eq!(Layout::of("2026/1/14.md"), None);
+        assert_eq!(layout.date("2026/11/14.md"), Some(date(2026, 11, 14)));
+        assert_eq!(layout.date("Notes/2026/11/14.md"), None);
+        assert_eq!(Layout::Flat("Daily".into()).date("Daily/2026-11-14.md"), Some(date(2026, 11, 14)));
+        assert_eq!(layout.date("2026/02/30.md"), None);
     }
 
     #[test]

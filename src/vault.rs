@@ -4,12 +4,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::parse::{self, Kind, Link, Note, Segment};
+use crate::dates::Layout;
+use crate::parse::{self, Kind, Link, Note, Segment, Syntax};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Root {
     /// A folder marked by a `.weft` file or an `.obsidian` folder: every
-    /// non-hidden file is part of it.
+    /// non-hidden file is part of it. A `.weft` file also means its notes
+    /// are written in weft's syntax (`Syntax::Weft`).
     Vault,
     /// A repository: Markdown files not ignored by `.gitignore`.
     Repo,
@@ -40,6 +42,7 @@ pub struct Vault {
     /// `root` with symlinks resolved: file events arrive with real paths.
     real_root: PathBuf,
     pub kind: Root,
+    pub syntax: Syntax,
     /// Paths from the root, with `/` separators and extensions.
     pub files: BTreeMap<String, File>,
     pub index: Index,
@@ -133,6 +136,7 @@ impl Vault {
             real_root: root.canonicalize().unwrap_or_else(|_| root.clone()),
             root,
             kind,
+            syntax: Syntax::Obsidian,
             files: BTreeMap::new(),
             index: Index::default(),
         };
@@ -140,6 +144,9 @@ impl Vault {
             (Root::Single, Some(only)) => vec![only.to_string()],
             _ => vault.walk(),
         };
+        if kind == Root::Vault && vault.root.join(".weft").is_file() {
+            vault.syntax = Syntax::Weft(Layout::detect(paths.iter()));
+        }
         for rel in paths {
             let file = vault.read(&rel);
             vault.files.insert(rel, file);
@@ -155,6 +162,7 @@ impl Vault {
             root: PathBuf::from("/vault"),
             real_root: PathBuf::from("/vault"),
             kind: Root::Vault,
+            syntax: Syntax::Obsidian,
             files: BTreeMap::new(),
             index: Index::default(),
         };
@@ -172,6 +180,24 @@ impl Vault {
         }
         vault.reindex();
         vault
+    }
+
+    /// `from_files`, for a vault in weft's syntax.
+    #[doc(hidden)]
+    pub fn weft_from_files(files: &[(&str, &str)]) -> Vault {
+        let mut vault = Vault::from_files(files);
+        vault.set_syntax(Syntax::Weft(Layout::detect(vault.files.keys())));
+        vault
+    }
+
+    /// Parses every note again, in `syntax`.
+    fn set_syntax(&mut self, syntax: Syntax) {
+        self.syntax = syntax;
+        for f in self.files.values_mut() {
+            if let Some(text) = &f.text {
+                f.note = parse::parse_with(text, &self.syntax);
+            }
+        }
     }
 
     fn walk(&self) -> Vec<String> {
@@ -204,7 +230,7 @@ impl Vault {
             String::from_utf8_lossy(bytes).into_owned()
         });
         File {
-            note: text.as_deref().map(parse::parse).unwrap_or_default(),
+            note: text.as_deref().map(|t| parse::parse_with(t, &self.syntax)).unwrap_or_default(),
             text,
             open: None,
             stamp,
@@ -213,6 +239,13 @@ impl Vault {
 
     fn reindex(&mut self) {
         self.index = Index::build(self.files.keys().cloned());
+        // Where `@` days point follows the daily notes.
+        if let Syntax::Weft(layout) = &self.syntax {
+            let now = Layout::detect(self.files.keys());
+            if &now != layout {
+                self.set_syntax(Syntax::Weft(now));
+            }
+        }
     }
 
     pub fn path(&self, rel: &str) -> PathBuf {
@@ -254,6 +287,11 @@ impl Vault {
         self.index.link_text(rel, from)
     }
 
+    /// A whole new link in `from` to `rel`, in the vault's syntax.
+    pub fn write_link(&self, rel: &str, from: &str) -> String {
+        parse::write_link(&self.syntax, &self.link_text(rel, from), rel)
+    }
+
     pub fn open(&mut self, rel: &str, text: String, version: i32) {
         let new = !self.files.contains_key(rel);
         let file = self.files.entry(rel.to_string()).or_insert_with(|| File {
@@ -262,7 +300,7 @@ impl Vault {
             open: None,
             stamp: None,
         });
-        file.note = parse::parse(&text);
+        file.note = parse::parse_with(&text, &self.syntax);
         file.text = Some(text);
         file.open = Some(version);
         if new {
@@ -277,7 +315,7 @@ impl Vault {
     /// Reparses an open file after its text changed.
     pub fn reparse(&mut self, rel: &str) {
         if let Some(f) = self.files.get_mut(rel) {
-            f.note = f.text.as_deref().map(parse::parse).unwrap_or_default();
+            f.note = f.text.as_deref().map(|t| parse::parse_with(t, &self.syntax)).unwrap_or_default();
         }
     }
 

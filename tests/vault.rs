@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use weft::ctx::Ctx;
-use weft::parse::Kind;
+use weft::parse::{Kind, Syntax};
 use weft::text::{self, Encoding};
 use weft::vault::{self, Dest, Vault};
 
@@ -51,7 +51,10 @@ fn apply(v: &Vault, edits: &BTreeMap<String, Vec<(text::Span, String)>>, moves: 
         files.push((rel, text));
     }
     let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-    Vault::from_files(&refs)
+    match v.syntax {
+        Syntax::Weft(_) => Vault::weft_from_files(&refs),
+        Syntax::Obsidian => Vault::from_files(&refs),
+    }
 }
 
 fn line_offset(text: &str, line: u32) -> usize {

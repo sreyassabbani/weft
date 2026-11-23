@@ -63,7 +63,8 @@ semantics.
 A **vault** is found from the file being opened: the nearest ancestor
 directory marked as a vault (an empty `.weft` file, or Obsidian's `.obsidian`
 folder), else the nearest containing `.git`, `.jj` or `.hg`. `.weft` lets a
-vault keep working once Obsidian is gone; it holds nothing. A file with neither is handled alone, without scanning its directory.
+vault keep working once Obsidian is gone, and says its notes are written in
+weft's syntax (below); it holds nothing. A file with neither is handled alone, without scanning its directory.
 The editor's `rootUri` is not trusted for this, since Helix reports the
 working directory when it finds no marker.
 
@@ -132,6 +133,29 @@ links. They only answer go-to-definition, when `path` (relative to the note,
 percent-decoded, optional `#heading`) names an existing file. This makes `gd`
 work on local links in READMEs, where Helix's `gf` guesses at the word under
 the cursor.
+
+### weft's syntax
+
+A vault marked by `.weft` is written in Obsidian's syntax plus two shorter
+forms, for less punctuation to read around. A vault marked only by
+`.obsidian` keeps Obsidian's syntax, since there `[REF1]` is just text.
+
+- `[Note]` is `[[Note]]`, with `#heading`, `|alias` and `!` embeds as
+  before. Markdown's own uses of single brackets are left alone: checkboxes
+  (`[ ]`, `[x]`), footnotes (`[^1]`), links and references (`[a](b)`,
+  `[a][b]`, `[a]: url`), escaped `\[`, and text with no letter or digit,
+  such as `[...]`. Anything else in single brackets is a link, to a note not
+  written yet if no note has that name.
+- `@2026.11.22`, at the start of a word, is the day's note: wherever the
+  vault's daily notes live (`2026/11/22.md`, `Daily/2026-11-22.md`), read from
+  the paths most of them use. Only the full date with zero padding is a
+  link; `@11.22` and `@fri` are what completion turns into one.
+
+Both are links like any other for definition, references, hover and rename.
+Generated links use them: `@` completion inserts `@2026.11.22`, a day's note
+is written as one in change lists, and a renamed day stays a day while its
+new name is one (`[Trip]` otherwise). `[` opens the same completion as `[[`,
+except where a checkbox or footnote is being typed.
 
 ### Diagnostics
 
@@ -211,7 +235,8 @@ src/
   main.rs       entry, `--version`
   server.rs     LSP loop, capabilities, document sync
   vault.rs      files, names, resolution, link text
-  parse.rs      line scanner: frontmatter aliases, headings, links, blocks
+  parse.rs      line scanner: frontmatter aliases, headings, links, blocks;
+                both syntaxes
   text.rs       positions and encodings
   target.rs     what the cursor is on
   complete.rs   hover.rs  refs.rs  rename.rs  symbols.rs  diagnose.rs
@@ -235,6 +260,7 @@ Frontmatter is read by hand for `aliases:` only; no YAML parser.
   print one on every such line; hover says it instead.
 - Daily-note commands, templates, graph views.
 - Reading Obsidian's settings. Non-default link formats are not generated.
+- Converting existing links between the two syntaxes. Both are read.
 
 ## Plan
 

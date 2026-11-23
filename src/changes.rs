@@ -41,8 +41,8 @@ pub fn classify<'a>(events: impl IntoIterator<Item = (char, &'a str)>) -> BTreeM
 
 /// The three blocks, in the order and form obsidian-list-modified writes
 /// them, or `None` when no note changed. Created and modified notes are
-/// linked the way the server writes links from `into`; a note no longer in
-/// the vault, and every deleted one, by its path.
+/// linked the way the server writes links from `into`, in the vault's
+/// syntax; a note no longer in the vault, and every deleted one, by its path.
 pub fn render(vault: &Vault, changes: &BTreeMap<&str, Change>, into: &str) -> Option<String> {
     if changes.is_empty() {
         return None;
@@ -51,11 +51,11 @@ pub fn render(vault: &Vault, changes: &BTreeMap<&str, Change>, into: &str) -> Op
     for (label, kind) in [("CREATED", Change::Created), ("MODIFIED", Change::Modified), ("DELETED", Change::Deleted)] {
         out.push_str(&format!("%% LIST {label} %%\n"));
         for (rel, _) in changes.iter().filter(|(_, c)| **c == kind) {
-            let text = match vault.note(rel) {
-                Some(_) if kind != Change::Deleted => vault.link_text(rel, into),
-                _ => rel[..rel.len() - 3].to_string(),
+            let link = match vault.note(rel) {
+                Some(_) if kind != Change::Deleted => vault.write_link(rel, into),
+                _ => crate::parse::write_link(&vault.syntax, &rel[..rel.len() - 3], rel),
             };
-            out.push_str(&format!("- [[{text}]]\n"));
+            out.push_str(&format!("- {link}\n"));
         }
         out.push_str("%% END %%\n");
     }
@@ -190,6 +190,11 @@ mod tests {
                     %% LIST DELETED %%\n- [[Old/Thing]]\n%% END %%\n";
         assert_eq!(render(&v, &changes, "2026/11/19.md").as_deref(), Some(want));
         assert_eq!(render(&v, &BTreeMap::new(), ""), None);
+        let v = Vault::weft_from_files(&[("Plan.md", ""), ("2026/11/18.md", ""), ("2026/11/19.md", "")]);
+        let changes = BTreeMap::from([("Plan.md", Change::Created), ("2026/11/18.md", Change::Modified)]);
+        let want = "%% LIST CREATED %%\n- [Plan]\n%% END %%\n%% LIST MODIFIED %%\n- @2026.11.18\n%% END %%\n\
+                    %% LIST DELETED %%\n%% END %%\n";
+        assert_eq!(render(&v, &changes, "2026/11/19.md").as_deref(), Some(want));
     }
 
     #[test]

@@ -1,4 +1,5 @@
-//! weft: a language server for Obsidian-style Markdown notes.
+//! weft: a language server for Obsidian-style Markdown notes, and its own
+//! shorter syntax for them (`parse::Syntax`).
 
 pub mod changes;
 pub mod complete;

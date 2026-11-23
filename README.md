@@ -7,7 +7,10 @@ way Obsidian notes do. Written for Helix.
   titles, with headings after `#`, block ids after `#^`, frontmatter
   aliases, and notes not written yet
 - `@` for daily notes: `@today`, `@fri`, `@11.15` or `@2026.11.15` completes
-  to a plain `[[2026/11/15]]`, in whatever layout the vault's daily notes use
+  to a link to that day's note, in whatever layout the vault's daily notes
+  use
+- an optional shorter syntax, `[Note]` and `@2026.11.15`, in vaults marked
+  by `.weft` (see below)
 - go to definition on links, notes, headings and blocks; on a note not
   written yet it opens a new buffer where Obsidian would create it
 - references, hover, document and workspace symbols
@@ -43,6 +46,19 @@ the `.obsidian` folder Obsidian keeps. In a marked vault every file that is
 not hidden is part of it, so attachments resolve by name anywhere; in a
 repository, Markdown files not ignored by `.gitignore`. A file outside both
 is handled on its own.
+
+## weft's syntax
+
+A vault marked by `.weft` may also write `[Note]` for `[[Note]]`, and
+`@2026.11.15` for a link to that day's note. Single brackets that mean
+something else in Markdown stay text: checkboxes, footnotes (`[^1]`),
+Markdown links and references, and brackets with no letter or digit inside
+(`[...]`). Every other `[text]` is a link, to a note not written yet if
+none has that name.
+
+In this syntax `[` completes like `[[`, `@` completes to `@2026.11.15`, and
+change lists are written with it. `[[Note]]` keeps working. A vault marked
+only by `.obsidian` keeps Obsidian's syntax.
 
 ## Helix
 

@@ -86,13 +86,13 @@ pub fn under(vault: &Vault, rel: &str, line: u32, byte: u32) -> Option<Target> {
     })
 }
 
-/// A wikilink pointing at a target.
+/// A wikilink or day pointing at a target.
 pub struct Ref<'a> {
     pub file: &'a String,
     pub link: &'a Link,
 }
 
-/// Every wikilink pointing at `target`. A link to a heading or block counts
+/// Every wikilink or day pointing at `target`. A link to a heading or block counts
 /// toward its note too.
 pub fn links_to<'a>(vault: &'a Vault, target: &Target) -> Vec<Ref<'a>> {
     let (dest, file) = match target {
@@ -103,7 +103,7 @@ pub fn links_to<'a>(vault: &'a Vault, target: &Target) -> Vec<Ref<'a>> {
     };
     let mut out = Vec::new();
     for (from, note) in vault.notes() {
-        for link in note.links.iter().filter(|l| l.kind == Kind::Wiki) {
+        for link in note.links.iter().filter(|l| l.kind != Kind::Markdown) {
             if vault.resolve(from, &link.path) != dest {
                 continue;
             }
@@ -166,6 +166,17 @@ mod tests {
         assert_eq!(t, Target::Heading { file: "Array.md".into(), index: 2 });
         assert_eq!(under(&v, "Sorting.md", 0, 10).unwrap(), Target::Note(Dest::File("Array.md".into())));
         assert_eq!(under(&v, "Array.md", 3, 6).unwrap(), Target::Block { file: "Array.md".into(), index: 0 });
+    }
+
+    #[test]
+    fn weft_references() {
+        let v = Vault::weft_from_files(&[
+            ("2026/11/14.md", ""),
+            ("a.md", "[2026/11/14] and @2026.11.14, [[2026/11/14]]"),
+        ]);
+        let refs = links_to(&v, &Target::Note(Dest::File("2026/11/14.md".into())));
+        assert_eq!(refs.len(), 3);
+        assert_eq!(under(&v, "a.md", 0, 20).unwrap(), Target::Note(Dest::File("2026/11/14.md".into())));
     }
 
     #[test]

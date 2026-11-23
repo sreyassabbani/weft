@@ -17,7 +17,7 @@ use lsp_types::{
 };
 
 use crate::ctx::Ctx;
-use crate::parse::Kind;
+use crate::parse::{self, Kind, Link, Syntax};
 use crate::target::{self, On, Part, Target};
 use crate::text::Span;
 use crate::vault::{self, Dest, Index, Vault};
@@ -130,7 +130,8 @@ pub fn rename(cx: &Ctx, rel: &str, pos: Position, new: &str) -> Result<(Workspac
                 if let Dest::File(f) = vault.resolve("", &text) {
                     return Err(format!("“{}” already exists", vault::link_name(&f)));
                 }
-                edits.entry((*from).clone()).or_default().push((link.path_span, text));
+                let rel = format!("{text}.md");
+                edits.entry((*from).clone()).or_default().push(relink(&vault.syntax, link, text, &rel));
             }
         }
         Target::Heading { file, index } => {
@@ -193,12 +194,21 @@ pub fn rename(cx: &Ctx, rel: &str, pos: Position, new: &str) -> Result<(Workspac
     Ok((edit, moved))
 }
 
-/// Wikilinks resolving to `dest`.
-fn links_named<'a>(vault: &'a Vault, dest: &'a Dest) -> impl Iterator<Item = (&'a String, &'a crate::parse::Link)> {
+/// The edit pointing `link` at `rel`, whose link text is `text`: the path
+/// part of a wikilink, or all of a day, which may stop being one.
+fn relink(syntax: &Syntax, link: &Link, text: String, rel: &str) -> (Span, String) {
+    match link.kind {
+        Kind::Day => (link.span, parse::write_link(syntax, &text, rel)),
+        _ => (link.path_span, text),
+    }
+}
+
+/// Wikilinks and days resolving to `dest`.
+fn links_named<'a>(vault: &'a Vault, dest: &'a Dest) -> impl Iterator<Item = (&'a String, &'a Link)> {
     vault.notes().flat_map(move |(from, note)| {
         note.links
             .iter()
-            .filter(move |l| l.kind == Kind::Wiki && &vault.resolve(from, &l.path) == dest)
+            .filter(move |l| l.kind != Kind::Markdown && &vault.resolve(from, &l.path) == dest)
             .map(move |l| (from, l))
     })
 }
@@ -276,13 +286,14 @@ pub fn move_edits(vault: &Vault, moves: &[(String, String)]) -> BTreeMap<String,
     let mut edits: BTreeMap<String, Vec<(Span, String)>> = BTreeMap::new();
     for (from, note) in vault.notes() {
         let from_after = moved.get(from.as_str()).copied().unwrap_or(from);
-        for link in note.links.iter().filter(|l| l.kind == Kind::Wiki && !l.path.is_empty()) {
+        for link in note.links.iter().filter(|l| l.kind != Kind::Markdown && !l.path.is_empty()) {
             let Dest::File(target) = vault.resolve(from, &link.path) else { continue };
             let want = moved.get(target.as_str()).map_or(target.clone(), |n| n.to_string());
             if after.resolve(from_after, &link.path) == Dest::File(want.clone()) {
                 continue;
             }
-            edits.entry(from.clone()).or_default().push((link.path_span, after.link_text(&want, from_after)));
+            let text = after.link_text(&want, from_after);
+            edits.entry(from.clone()).or_default().push(relink(&vault.syntax, link, text, &want));
         }
     }
     edits
@@ -457,6 +468,23 @@ mod tests {
         assert!(run(&v, "Sorting.md", 1, 4, "Array").unwrap_err().contains("already exists"));
         let v = Vault::from_files(&[("a.md", "[[projects/Someday]]")]);
         assert_eq!(run(&v, "a.md", 0, 4, "Later").unwrap(), [("a.md".into(), "projects/Later".into())]);
+    }
+
+    #[test]
+    fn days() {
+        let v = Vault::weft_from_files(&[
+            ("2026/11/14.md", ""),
+            ("2026/11/16.md", ""),
+            ("a.md", "@2026.11.14 [2026/11/14] @2026.11.30"),
+        ]);
+        // Renamed from a day: still a day, then no longer one.
+        let got = run(&v, "a.md", 0, 3, "15").unwrap();
+        assert_eq!(got[..2], [("a.md".into(), "@2026.11.15".into()), ("a.md".into(), "15".into())]);
+        let got = run(&v, "a.md", 0, 3, "Trip").unwrap();
+        assert_eq!(got[0], ("a.md".into(), "[Trip]".into()));
+        // A day not written yet.
+        let got = run(&v, "a.md", 0, 30, "Later").unwrap();
+        assert_eq!(got, [("a.md".into(), "[2026/11/Later]".into())]);
     }
 
     #[test]
